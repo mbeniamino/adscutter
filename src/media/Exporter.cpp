@@ -1,10 +1,12 @@
 #include "media/Exporter.h"
 #include "media/Bitstream.h"
 #include "media/H264Splice.h"
+#include "media/Latm.h"
 #include "media/MediaFile.h"
 
 #include <QFile>
 #include <algorithm>
+#include <cstring>
 
 namespace adscutter {
 
@@ -26,6 +28,7 @@ struct StreamPlan {
     int64_t lastDts = INT64_MIN;    // in the output time base
     std::vector<uint8_t> paramSets; // last parameter sets seen (video)
     std::unique_ptr<H264Splicer> splicer;
+    std::unique_ptr<LatmConverter> latm; // AAC in LATM -> raw AAC
     uint64_t planned = 0, written = 0;
 };
 
@@ -211,6 +214,42 @@ bool exportMatroska(const QString &inputPath, const PacketIndex &index, const Ex
         }
     }
 
+    // --- AAC in LATM: find its configuration before writing the header ----------
+    bool anyLatm = false;
+    for (StreamPlan &p : plans) {
+        if (p.selected && p.index->codecId == AV_CODEC_ID_AAC_LATM) {
+            p.latm = std::make_unique<LatmConverter>();
+            anyLatm = true;
+        }
+    }
+    if (anyLatm) {
+        FormatContextPtr scan = openFormatContext(inputPath, &openError);
+        if (!scan)
+            return fail(openError);
+        PacketPtr sp(av_packet_alloc());
+        std::vector<std::vector<uint8_t>> ignored;
+        for (int n = 0; n < 200000; ++n) {
+            const bool missing = std::any_of(plans.begin(), plans.end(),
+                                             [](const StreamPlan &p) { return p.latm && !p.latm->hasConfig(); });
+            if (!missing || av_read_frame(scan.get(), sp.get()) < 0)
+                break;
+            if (sp->stream_index >= 0 && unsigned(sp->stream_index) < plans.size()) {
+                StreamPlan &p = plans[size_t(sp->stream_index)];
+                std::string why;
+                ignored.clear();
+                if (p.latm && !p.latm->hasConfig() && !p.latm->convert(sp->data, size_t(sp->size), ignored, &why)) {
+                    av_packet_unref(sp.get());
+                    return fail(QStringLiteral("Audio stream %1: %2").arg(sp->stream_index).arg(QString::fromStdString(why)));
+                }
+            }
+            av_packet_unref(sp.get());
+        }
+        for (const StreamPlan &p : plans) {
+            if (p.latm && !p.latm->hasConfig())
+                return fail(QStringLiteral("Audio stream %1: no AAC configuration found in the LATM stream").arg(p.in->index));
+        }
+    }
+
     // --- Output file ----------------------------------------------------------------
     const QString partPath = settings.outputPath + QStringLiteral(".part");
     QFile::remove(partPath);
@@ -238,6 +277,17 @@ bool exportMatroska(const QString &inputPath, const PacketIndex &index, const Ex
         if (!ost || avcodec_parameters_copy(ost->codecpar, p.in->codecpar) < 0)
             return fail(QStringLiteral("Out of memory"));
         ost->codecpar->codec_tag = 0;
+        if (p.latm) {
+            // Stored as plain AAC: the configuration becomes the codec private data.
+            const std::vector<uint8_t> &asc = p.latm->audioSpecificConfig();
+            ost->codecpar->codec_id = AV_CODEC_ID_AAC;
+            av_freep(&ost->codecpar->extradata);
+            ost->codecpar->extradata = static_cast<uint8_t *>(av_mallocz(asc.size() + AV_INPUT_BUFFER_PADDING_SIZE));
+            if (!ost->codecpar->extradata)
+                return fail(QStringLiteral("Out of memory"));
+            std::memcpy(ost->codecpar->extradata, asc.data(), asc.size());
+            ost->codecpar->extradata_size = int(asc.size());
+        }
         ost->time_base = p.in->time_base;
         ost->disposition = p.in->disposition;
         av_dict_copy(&ost->metadata, p.in->metadata, 0);
@@ -270,7 +320,7 @@ bool exportMatroska(const QString &inputPath, const PacketIndex &index, const Ex
     };
 
     PacketPtr pkt(av_packet_alloc());
-    bool spliceWarned = false;
+    bool spliceWarned = false, latmWarned = false;
     const int64_t fileSize = avio_size(in->pb);
     uint64_t count = 0;
     for (;;) {
@@ -406,6 +456,49 @@ bool exportMatroska(const QString &inputPath, const PacketIndex &index, const Ex
         }
         pkt->stream_index = p.out->index;
         pkt->pos = -1;
+
+        if (p.latm) {
+            // One LOAS frame may carry several AAC frames: one packet each.
+            std::vector<std::vector<uint8_t>> frames;
+            std::string why;
+            if (!p.latm->convert(pkt->data, size_t(pkt->size), frames, &why)) {
+                av_packet_unref(pkt.get());
+                return abort(QStringLiteral("Audio stream %1: %2").arg(p.in->index).arg(QString::fromStdString(why)));
+            }
+            if (p.latm->configChanged() && !latmWarned) {
+                report.warnings << QStringLiteral("The AAC audio format changes during the recording; "
+                                                  "only the first format is declared in the output");
+                latmWarned = true;
+            }
+            const int64_t total = pkt->duration > 0 ? pkt->duration
+                                                    : av_rescale_q(p.frameDurationUs, AV_TIME_BASE_Q, p.out->time_base);
+            const int64_t base = pkt->pts;
+            for (size_t k = 0; k < frames.size(); ++k) {
+                PacketPtr frame(av_packet_alloc());
+                if (av_new_packet(frame.get(), int(frames[k].size())) < 0) {
+                    av_packet_unref(pkt.get());
+                    return abort(QStringLiteral("Out of memory"));
+                }
+                std::memcpy(frame->data, frames[k].data(), frames[k].size());
+                int64_t ts = base + total * int64_t(k) / int64_t(frames.size());
+                if (k > 0 && ts <= p.lastDts)
+                    ts = p.lastDts + 1;
+                frame->pts = frame->dts = ts;
+                p.lastDts = ts;
+                frame->duration = total / int64_t(frames.size());
+                frame->flags = AV_PKT_FLAG_KEY;
+                frame->stream_index = p.out->index;
+                ret = av_interleaved_write_frame(out.ctx, frame.get());
+                if (ret < 0) {
+                    av_packet_unref(pkt.get());
+                    return abort(QStringLiteral("Write error: %1").arg(avErrorString(ret)));
+                }
+                ++report.packetsWritten;
+            }
+            av_packet_unref(pkt.get());
+            ++p.written;
+            continue;
+        }
 
         ret = av_interleaved_write_frame(out.ctx, pkt.get());
         if (ret < 0)

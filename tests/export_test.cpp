@@ -26,6 +26,7 @@
 #include <cstdarg>
 #include <cstdio>
 #include <map>
+#include <set>
 #include <mutex>
 
 using namespace adscutter;
@@ -57,6 +58,100 @@ void logCallback(void *, int level, const char *fmt, va_list args)
     std::lock_guard lock(logMutex);
     ++loggedErrors;
     std::fprintf(stderr, "  ffmpeg: %s", line);
+}
+
+struct SegTiming {
+    int64_t offsetUs, startUs, endUs; // output = source + offset
+};
+
+// Decodes a whole audio stream: (pts in the stream time base, PCM hash) per frame.
+std::vector<std::pair<int64_t, QByteArray>> decodeAudio(const QString &path, int stream, AVRational *timeBase)
+{
+    std::vector<std::pair<int64_t, QByteArray>> frames;
+    QString error;
+    FormatContextPtr fmt = openFormatContext(path, &error);
+    const AVStream *st = fmt->streams[stream];
+    *timeBase = st->time_base;
+    const AVCodec *codec = avcodec_find_decoder(st->codecpar->codec_id);
+    CodecContextPtr ctx(avcodec_alloc_context3(codec));
+    avcodec_parameters_to_context(ctx.get(), st->codecpar);
+    ctx->pkt_timebase = st->time_base;
+    avcodec_open2(ctx.get(), codec, nullptr);
+    PacketPtr pkt(av_packet_alloc());
+    FramePtr frame(av_frame_alloc());
+    auto drain = [&] {
+        while (avcodec_receive_frame(ctx.get(), frame.get()) >= 0) {
+            QCryptographicHash h(QCryptographicHash::Md5);
+            const int bytes = av_get_bytes_per_sample(AVSampleFormat(frame->format));
+            const bool planar = av_sample_fmt_is_planar(AVSampleFormat(frame->format));
+            const int channels = frame->ch_layout.nb_channels;
+            for (int c = 0; c < (planar ? channels : 1); ++c)
+                h.addData(QByteArrayView(frame->extended_data[c], frame->nb_samples * bytes * (planar ? 1 : channels)));
+            frames.emplace_back(frame->pts, h.result());
+            av_frame_unref(frame.get());
+        }
+    };
+    while (av_read_frame(fmt.get(), pkt.get()) >= 0) {
+        if (pkt->stream_index == stream) {
+            avcodec_send_packet(ctx.get(), pkt.get());
+            drain();
+        }
+        av_packet_unref(pkt.get());
+    }
+    avcodec_send_packet(ctx.get(), nullptr);
+    drain();
+    return frames;
+}
+
+// For audio whose packets were rewritten (LATM -> AAC): every decoded output
+// frame must equal a decoded source frame taken at its segment's offset.
+// The first frame after each cut may differ: AAC overlaps consecutive frames.
+void checkDecodedAudio(const QString &source, const PacketIndex &index, int sourceStream, const QString &output,
+                       int outputStream, const std::vector<SegTiming> &timing)
+{
+    AVRational srcTb, outTb;
+    const auto src = decodeAudio(source, sourceStream, &srcTb);
+    const auto out = decodeAudio(output, outputStream, &outTb);
+
+    // Source frame pts -> unified time, through the index.
+    const PacketIndex::Stream &s = index.streams()[size_t(sourceStream)];
+    std::map<int64_t, int64_t> unified;
+    for (uint32_t i = 0; i < s.packets.size(); ++i)
+        if (s.packets[i].pts != AV_NOPTS_VALUE)
+            unified[s.packets[i].pts] = index.unifiedPts(s, i);
+    std::multimap<QByteArray, int64_t> byHash;
+    for (const auto &[pts, hash] : src)
+        if (auto it = unified.find(pts); it != unified.end())
+            byHash.emplace(hash, it->second);
+
+    size_t checked = 0, firstOfSegment = 0, bad = 0;
+    const SegTiming *previous = nullptr;
+    for (const auto &[pts, hash] : out) {
+        const int64_t t = av_rescale_q(pts, outTb, AV_TIME_BASE_Q);
+        const SegTiming *seg = nullptr;
+        for (const SegTiming &st : timing)
+            if (t + 10000 >= st.startUs - 1000 && t < st.endUs + 1000)
+                seg = &st;
+        if (!seg)
+            continue;
+        if (seg != previous) {
+            previous = seg;
+            ++firstOfSegment;
+            continue; // overlaps with audio that was cut away
+        }
+        ++checked;
+        bool found = false;
+        const auto range = byHash.equal_range(hash);
+        for (auto it = range.first; it != range.second; ++it)
+            found |= std::llabs(it->second - (t - seg->offsetUs)) <= 1000;
+        if (!found && bad++ < 5)
+            fail("audio %d: decoded frame at %lld us does not match the source at the same offset", outputStream,
+                 static_cast<long long>(t));
+    }
+    std::printf("  audio %d: %zu decoded frames identical to the source in sync (%zu cut boundaries skipped)\n",
+                outputStream, checked - bad, firstOfSegment);
+    if (checked == 0)
+        fail("audio %d: no frames checked", outputStream);
 }
 
 QByteArray md5(const uint8_t *data, int size)
@@ -153,19 +248,23 @@ int main(int argc, char **argv)
     int outVideo = -1;
     std::vector<int> outAudio; // output index -> source index
     std::map<int, int> sourceOf;
+    std::set<int> subtitles; // output indices of subtitle streams (checked like audio, but sparse)
     for (unsigned i = 0; i < out->nb_streams && i < settings.streams.size(); ++i) {
         const StreamInfo &src = streams[size_t(settings.streams[i])];
         const AVStream *st = out->streams[i];
         sourceOf[int(i)] = src.index;
-        if (st->codecpar->codec_id != src.codecId)
+        const bool latmToAac = src.codecId == AV_CODEC_ID_AAC_LATM && st->codecpar->codec_id == AV_CODEC_ID_AAC;
+        if (st->codecpar->codec_id != src.codecId && !latmToAac)
             fail("stream %u: codec changed", i);
         const AVDictionaryEntry *lang = av_dict_get(st->metadata, "language", nullptr, 0);
         if (!src.language.isEmpty() && (!lang || src.language != QString::fromUtf8(lang->value)))
             fail("stream %u: language not preserved", i);
         if (src.index == videoIndex)
             outVideo = int(i);
-        if (src.type == AVMEDIA_TYPE_AUDIO)
+        if (src.type == AVMEDIA_TYPE_AUDIO || src.type == AVMEDIA_TYPE_SUBTITLE)
             outAudio.push_back(int(i));
+        if (src.type == AVMEDIA_TYPE_SUBTITLE)
+            subtitles.insert(int(i));
     }
     out.reset();
 
@@ -195,9 +294,6 @@ int main(int argc, char **argv)
     std::vector<int64_t> outUs(result.pts.size());
     for (size_t i = 0; i < result.pts.size(); ++i)
         outUs[i] = av_rescale_q(result.pts[i], result.timeBase, AV_TIME_BASE_Q);
-    struct SegTiming {
-        int64_t offsetUs, startUs, endUs; // output = source + offset
-    };
     std::vector<SegTiming> timing;
     size_t frame = 0;
     for (const auto &s : report.segments) {
@@ -239,7 +335,8 @@ int main(int argc, char **argv)
         while (av_read_frame(in.get(), pkt.get()) >= 0) {
             const int s = pkt->stream_index;
             const uint32_t i = counter[s]++;
-            if (index->streams()[size_t(s)].type == AVMEDIA_TYPE_AUDIO && i < index->streams()[size_t(s)].packets.size())
+            const AVMediaType type = index->streams()[size_t(s)].type;
+            if ((type == AVMEDIA_TYPE_AUDIO || type == AVMEDIA_TYPE_SUBTITLE) && i < index->streams()[size_t(s)].packets.size())
                 sourceAudio[s].emplace(md5(pkt->data, pkt->size), index->unifiedPts(index->streams()[size_t(s)], i));
             av_packet_unref(pkt.get());
         }
@@ -262,8 +359,9 @@ int main(int argc, char **argv)
                 fail("audio stream %d: timestamps not increasing", s);
             spans[s].emplace_back(start, end);
 
-            // Which segment: the one containing the packet's middle.
-            const int64_t mid = (start + end) / 2;
+            // Which segment: the one containing the packet's middle (start
+            // for subtitles, which may stay on screen across a cut).
+            const int64_t mid = subtitles.count(s) ? start : (start + end) / 2;
             const SegTiming *seg = nullptr;
             for (const SegTiming &t : timing)
                 if (mid >= t.startUs - 1000 && mid < t.endUs + 1000)
@@ -287,11 +385,26 @@ int main(int argc, char **argv)
 
         for (int s : outAudio) {
             const auto &sp = spans[s];
+            if (subtitles.count(s)) {
+                // Every source cue starting inside a kept part, and only those.
+                const PacketIndex::Stream &src = index->streams()[size_t(sourceOf[s])];
+                size_t expected = 0;
+                for (const auto &seg : report.segments)
+                    for (uint32_t pos = 0; pos < src.displayOrder.size(); ++pos) {
+                        const int64_t t = index->unifiedPts(src, src.displayOrder[pos]);
+                        expected += t >= seg.sourceStartUs && t < seg.sourceStartUs + seg.durationUs;
+                    }
+                std::printf("  subtitles %d: %zu cues (%zu matched to source bytes in sync), %zu expected\n", s,
+                            sp.size(), matched[s], expected);
+                if (sp.size() != expected || matched[s] != expected)
+                    fail("subtitles %d: wrong cues", s);
+                continue;
+            }
             const int64_t dur = sp.empty() ? 0 : sp.front().second - sp.front().first;
             std::printf("  audio %d: %zu packets (%zu matched to source bytes), frame %.1f ms\n", s, sp.size(),
                         matched[s], dur / 1e3);
             if (matched[s] == 0)
-                std::printf("  note: audio %d repacketized by the muxer; sync check by content skipped\n", s);
+                checkDecodedAudio(path, *index, sourceOf[s], settings.outputPath, s, timing);
             // Coverage of each segment within half a frame (+ rounding).
             for (const SegTiming &t : timing) {
                 int64_t first = INT64_MAX, last = INT64_MIN;
@@ -318,6 +431,8 @@ int main(int argc, char **argv)
         FormatContextPtr o = openFormatContext(settings.outputPath, &error);
         std::map<int, CodecContextPtr> decoders;
         for (int s : outAudio) {
+            if (subtitles.count(s))
+                continue; // subtitles use a different decoding API
             const AVCodec *c = avcodec_find_decoder(o->streams[s]->codecpar->codec_id);
             CodecContextPtr ctx(avcodec_alloc_context3(c));
             avcodec_parameters_to_context(ctx.get(), o->streams[s]->codecpar);

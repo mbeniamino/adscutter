@@ -37,9 +37,10 @@ void checkMkvCompatibility(StreamInfo &info)
         return;
     }
     if (info.codecId == AV_CODEC_ID_AAC_LATM) {
-        // Not accepted by the Matroska muxer as-is; a LATM -> raw AAC
-        // repacketizer is planned (milestone 6).
-        info.exportNote = QStringLiteral("AAC LATM needs repacketizing (not yet supported)");
+        // Matroska stores AAC without the LATM framing: the exporter removes
+        // it (the audio itself is not re-encoded).
+        info.mkvCompatible = true;
+        info.exportNote = QStringLiteral("Exported as AAC (LATM framing removed, no re-encoding)");
         return;
     }
     if (info.codecId == AV_CODEC_ID_DVB_TELETEXT) {

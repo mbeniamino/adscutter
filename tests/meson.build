@@ -49,7 +49,7 @@ fixtures = [
    ['-c:v', 'libx265', '-preset', 'ultrafast', '-x265-params', 'log-level=error:keyint=25:bframes=3'],
    ['-c:a', 'aac', '-b:a', '128k'],
    ['-f', 'mpegts', '-mpegts_flags', 'latm'],
-   '1280', '720', '1.7778', ['--expect-unexportable', 'aac_latm']],
+   '1280', '720', '1.7778', []],
   # Matroska input (e.g. a previous AdsCutter export)
   ['h264_aac.mkv', '1024x576',
    ['-c:v', 'libx264', '-preset', 'ultrafast', '-bf', '2', '-g', '50'],
@@ -107,6 +107,23 @@ fixture_targets += {
     input: fixture_targets['part_low.ts'],
     output: 'h264_noparams.ts',
     command: [python, '-I', files('neutralize_params.py'), '@INPUT@', '@OUTPUT@'],
+    build_by_default: false,
+  ),
+}
+
+# Matroska with text subtitles (a cue every 0.5 s), for subtitle passthrough.
+fixture_targets += {
+  'subtitles.mkv': custom_target('subtitles.mkv',
+    input: files('cues.srt'),
+    output: 'subtitles.mkv',
+    command: [ffmpeg, '-hide_banner', '-loglevel', 'error', '-y',
+              '-f', 'lavfi', '-i', 'testsrc2=size=640x360:rate=25,format=yuv420p',
+              '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000',
+              '-i', '@INPUT@', '-t', '6',
+              '-map', '0:v', '-map', '1:a', '-map', '2:s',
+              '-metadata:s:s:0', 'language=ita',
+              '-c:v', 'libx264', '-preset', 'ultrafast', '-bf', '2', '-g', '50',
+              '-c:a', 'aac', '-c:s', 'srt', '@OUTPUT@'],
     build_by_default: false,
   ),
 }
@@ -200,8 +217,9 @@ export_cases = [
   ['mpeg2_sd.ts', '0-149', ''],
   ['h264_hd.ts', '30-70,100-149', ''],
   ['h264_noparams.ts', '30-70,100-149', ''],
-  ['hevc_latm.ts', '30-70,100-140', '0'],
+  ['hevc_latm.ts', '30-70,100-140', ''],
   ['h264_aac.mkv', '10-80,110-149', ''],
+  ['subtitles.mkv', '10-80,110-149', ''],
   ['wrap.ts', '10-140', ''],
   ['jump_forward.ts', '100-200,250-299', ''],
   ['jump_backward.ts', '120-180', ''],
