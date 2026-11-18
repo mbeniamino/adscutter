@@ -19,6 +19,7 @@ class QToolButton;
 namespace adscutter {
 
 class NavigationBar;
+class PlaybackController;
 class SegmentPanel;
 class StreamPanel;
 class Timeline;
@@ -68,6 +69,9 @@ private:
     void stopFrameServer();
     void navigate(Step step);
     void goTo(int64_t pos);
+    void showPosition(uint32_t pos); // move without stopping playback
+    void togglePlayback();
+    int playbackAudioStream() const;
     void showFrame(const DisplayFrame &frame);
     const PacketIndex::Stream *videoIndex() const;
 
@@ -98,6 +102,10 @@ private:
     QToolButton *m_indexCancel;
     QAction *m_rebuildIndexAction = nullptr;
     QAction *m_deinterlaceAction = nullptr;
+    QAction *m_playAction = nullptr;
+    QAction *m_keptOnlyAction = nullptr;
+    QAction *m_muteAction = nullptr;
+    PlaybackController *m_playback = nullptr;
     QAction *m_undoAction = nullptr;
     QAction *m_redoAction = nullptr;
     QList<QAction *> m_navigationActions;

@@ -62,21 +62,44 @@ void FrameServer::setDeinterlace(bool enabled)
     m_wake.notify_one();
 }
 
+void FrameServer::setPlaying(bool playing)
+{
+    {
+        std::lock_guard lock(m_mutex);
+        m_playing = playing;
+    }
+    m_wake.notify_one();
+}
+
 void FrameServer::run()
 {
+    constexpr uint32_t kPrefetch = 12; // frames decoded ahead while playing
     FrameConverter converter;
+    uint32_t prefetchNext = 0, prefetchEnd = 0;
     for (;;) {
         uint32_t pos;
         bool deinterlace;
         {
             std::unique_lock lock(m_mutex);
-            m_wake.wait(lock, [this] { return m_stop || m_pending; });
+            auto prefetching = [&] { return m_playing && prefetchNext < prefetchEnd; };
+            m_wake.wait(lock, [&] { return m_stop || m_pending || prefetching(); });
             if (m_stop)
                 return;
+            if (!m_pending) {
+                // Nothing requested: decode one frame ahead, then check again.
+                const uint32_t ahead = prefetchNext++;
+                lock.unlock();
+                QString ignored;
+                if (!m_decoder->isCached(ahead))
+                    m_decoder->frameAt(ahead, &ignored);
+                continue;
+            }
             pos = *m_pending;
             m_pending.reset();
             deinterlace = m_deinterlace;
         }
+        prefetchNext = pos + 1;
+        prefetchEnd = std::min(pos + 1 + kPrefetch, m_decoder->frameCount());
 
         QString error;
         FramePtr frame = m_decoder->frameAt(pos, &error);

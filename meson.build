@@ -9,7 +9,7 @@ project('adscutter', 'cpp',
 )
 
 qt6 = import('qt6')
-qt_core_gui = dependency('qt6', modules: ['Core', 'Gui'])
+qt_core_gui = dependency('qt6', modules: ['Core', 'Gui', 'Multimedia'])
 qt_widgets = dependency('qt6', modules: ['Core', 'Gui', 'Widgets'])
 
 av_deps = [
@@ -17,6 +17,7 @@ av_deps = [
   dependency('libavcodec', version: '>= 61'),
   dependency('libavutil', version: '>= 59'),
   dependency('libswscale', version: '>= 8'),
+  dependency('libswresample', version: '>= 5'),
 ]
 
 inc = include_directories('src')
@@ -24,6 +25,8 @@ inc = include_directories('src')
 # Media layer: no widgets, so it can be used by tests and future CLI tools.
 media_lib = static_library('adscutter-media',
   files(
+    'src/media/AudioDecoder.cpp',
+    'src/media/AudioOutput.cpp',
     'src/media/Bitstream.cpp',
     'src/media/Deinterlace.cpp',
     'src/media/ExportJob.cpp',
@@ -41,7 +44,7 @@ media_lib = static_library('adscutter-media',
     'src/model/CutList.cpp',
   ),
   qt6.compile_moc(
-    headers: files('src/media/ExportJob.h', 'src/media/FrameServer.h', 'src/media/IndexJob.h'),
+    headers: files('src/media/AudioOutput.h', 'src/media/ExportJob.h', 'src/media/FrameServer.h', 'src/media/IndexJob.h'),
     include_directories: inc,
     dependencies: qt_core_gui,
   ),
@@ -58,6 +61,7 @@ ui_moc = qt6.compile_moc(
   headers: files(
     'src/ui/MainWindow.h',
     'src/ui/NavigationBar.h',
+    'src/ui/Playback.h',
     'src/ui/SegmentPanel.h',
     'src/ui/Timeline.h',
     'src/ui/VideoView.h',
@@ -71,6 +75,7 @@ ui_lib = static_library('adscutter-ui',
   files(
     'src/ui/MainWindow.cpp',
     'src/ui/NavigationBar.cpp',
+    'src/ui/Playback.cpp',
     'src/ui/SegmentPanel.cpp',
     'src/ui/Timeline.cpp',
     'src/ui/VideoView.cpp',

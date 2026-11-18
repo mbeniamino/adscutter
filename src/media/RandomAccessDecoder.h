@@ -39,6 +39,7 @@ public:
 
     void setCacheBudget(size_t bytes);
     size_t cachedFrames() const { return m_cache.size(); }
+    bool isCached(uint32_t pos) const { return m_cache.count(pos) != 0; }
 
     // Statistics, for tests and diagnostics.
     struct Stats {

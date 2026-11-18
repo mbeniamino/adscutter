@@ -14,6 +14,7 @@
 #include "ui/Timeline.h"
 
 #include <QApplication>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QLabel>
 #include <QMessageBox>
@@ -91,6 +92,7 @@ void dragTimeline(Timeline *t, double from, double to)
 
 int main(int argc, char **argv)
 {
+    qputenv("ADSCUTTER_NO_AUDIO", "1"); // tests stay silent
     QApplication app(argc, argv);
     if (argc < 2) {
         std::fprintf(stderr, "usage: %s FILE [SCREENSHOT.png]\n", argv[0]);
@@ -236,6 +238,10 @@ int main(int argc, char **argv)
     }
     if (result)
         result->close();
+    // The dialogs took the activation: shortcuts need the main window active.
+    window->activateWindow();
+    if (!QTest::qWaitForWindowActive(window.get()))
+        std::printf("note: window not active again after the export dialogs\n");
     // Segments [24,44] and [60,149]: 21 + 90 frames, plus P frame 45 which
     // B frame 44 depends on (reported as one extra frame).
     const auto decoded = test::decodeAll(exported, 0);
@@ -243,6 +249,55 @@ int main(int argc, char **argv)
     if (decoded.hashes.size() != 112) {
         std::fprintf(stderr, "FAIL: exported file should have 112 frames\n");
         ++failures;
+    }
+
+    // --- Playback ---------------------------------------------------------------
+    // Records the frames shown while playing for `ms` milliseconds.
+    auto playFor = [&](int ms) {
+        std::vector<int> shown;
+        key(w, Qt::Key_Space);
+        QElapsedTimer t;
+        t.start();
+        while (t.elapsed() < ms) {
+            QTest::qWait(5);
+            const int f = shownFrame(info);
+            if (shown.empty() || shown.back() != f)
+                shown.push_back(f);
+        }
+        key(w, Qt::Key_Space);
+        return shown;
+    };
+    key(w, Qt::Key_Home);
+    expectFrame(info, 1, "Home (before playing)");
+    {
+        const auto shown = playFor(1000);
+        const bool forward = std::is_sorted(shown.begin(), shown.end());
+        std::printf("%-30s -> frames %d..%d, %zu distinct shown\n", "play 1 s", shown.front(), shown.back(),
+                    shown.size());
+        // 25 fps: about 25 frames in a second, without stalls or jumps back.
+        if (!forward || shown.back() < 20 || shown.back() > 32 || shown.size() < 18) {
+            std::fprintf(stderr, "FAIL: playback was not smooth\n");
+            ++failures;
+        }
+    }
+    {
+        // Kept parts only, from inside the first segment (frames 25-45): the
+        // removed frames 46-60 must never be shown.
+        key(w, Qt::Key_K);
+        key(w, Qt::Key_Home);
+        key(w, Qt::Key_Up, 2);
+        key(w, Qt::Key_Right, 6);
+        expectFrame(info, 31, "to frame 31 (kept only)");
+        const auto shown = playFor(1500);
+        key(w, Qt::Key_K);
+        const bool skipped = std::none_of(shown.begin(), shown.end(), [](int f) { return f > 45 && f < 61; });
+        const bool jumped = std::any_of(shown.begin(), shown.end(), [](int f) { return f >= 61; });
+        std::printf("%-30s -> frames %d..%d, removed part %s\n", "play kept parts 1.5 s", shown.front(), shown.back(),
+                    skipped && jumped ? "skipped" : "NOT skipped");
+        if (!skipped || !jumped) {
+            std::fprintf(stderr, "FAIL: kept-only playback showed removed frames or did not reach the next part\n");
+            ++failures;
+        }
     }
 
     if (argc >= 3) {

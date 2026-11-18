@@ -1,5 +1,6 @@
 #include "ui/MainWindow.h"
 #include "ui/NavigationBar.h"
+#include "ui/Playback.h"
 #include "ui/SegmentPanel.h"
 #include "ui/StreamPanel.h"
 #include "ui/Timeline.h"
@@ -90,6 +91,17 @@ MainWindow::MainWindow(QWidget *parent)
     statusBar()->addPermanentWidget(m_indexCancel);
     statusBar()->addPermanentWidget(m_statusInfo);
     m_lastDir = QStandardPaths::writableLocation(QStandardPaths::MoviesLocation);
+
+    m_playback = new PlaybackController(this);
+    connect(m_playback, &PlaybackController::positionChanged, this, [this](quint32 pos) { showPosition(pos); });
+    connect(m_playback, &PlaybackController::message, this, [this](const QString &text) {
+        statusBar()->showMessage(text, 5000);
+    });
+    connect(m_playback, &PlaybackController::stateChanged, this, [this](bool playing) {
+        if (m_frameServer)
+            m_frameServer->setPlaying(playing);
+        m_playAction->setText(playing ? tr("&Pause") : tr("&Play"));
+    });
 
     connect(m_timeline, &Timeline::seekRequested, this, [this](int pos) { goTo(pos); });
     connect(m_timeline, &Timeline::edgeDragStarted, this, [this](int, bool) { m_cutList.checkpoint(); });
@@ -195,6 +207,39 @@ void MainWindow::createActions()
     }
     m_navigation->addActions({inButton, outButton});
 
+    m_playAction = new QAction(tr("&Play"), this);
+    m_playAction->setShortcut(Qt::Key_Space);
+    m_playAction->setToolTip(tr("Play / pause (Space)"));
+    m_playAction->setEnabled(false);
+    connect(m_playAction, &QAction::triggered, this, &MainWindow::togglePlayback);
+    addAction(m_playAction);
+    m_editActions << m_playAction;
+    auto *playButton = new QAction(QStringLiteral("▶ ❚❚"), this);
+    playButton->setToolTip(m_playAction->toolTip());
+    playButton->setEnabled(false);
+    connect(m_playAction, &QAction::changed, playButton, [playButton, this] { playButton->setEnabled(m_playAction->isEnabled()); });
+    connect(playButton, &QAction::triggered, m_playAction, &QAction::trigger);
+    m_navigation->addSeparator();
+    m_navigation->addActions({playButton});
+
+    m_keptOnlyAction = new QAction(tr("Play &Kept Parts Only"), this);
+    m_keptOnlyAction->setCheckable(true);
+    m_keptOnlyAction->setShortcut(Qt::Key_K);
+    m_keptOnlyAction->setToolTip(tr("Preview the result: playback skips the removed parts"));
+    connect(m_keptOnlyAction, &QAction::toggled, this, [this](bool) {
+        if (m_playback->isPlaying()) { // apply right away
+            m_playback->stop();
+            togglePlayback();
+        }
+    });
+    addAction(m_keptOnlyAction);
+
+    m_muteAction = new QAction(tr("&Mute"), this);
+    m_muteAction->setCheckable(true);
+    m_muteAction->setShortcut(Qt::Key_M);
+    connect(m_muteAction, &QAction::toggled, m_playback, &PlaybackController::setMuted);
+    addAction(m_muteAction);
+
     m_undoAction = new QAction(tr("&Undo"), this);
     m_undoAction->setShortcuts(QKeySequence::Undo); // all platform bindings, not just the first
     m_undoAction->setEnabled(false);
@@ -246,6 +291,10 @@ void MainWindow::createMenus()
         editMenu->addAction(m_editActions[i]);
 
     QMenu *goMenu = menuBar()->addMenu(tr("&Go"));
+    goMenu->addAction(m_playAction);
+    goMenu->addAction(m_keptOnlyAction);
+    goMenu->addAction(m_muteAction);
+    goMenu->addSeparator();
     for (int i = 0; i < m_navigationActions.size(); ++i) {
         goMenu->addAction(m_navigationActions[i]);
         if (i == 0 || i == 3 || i == 7 || i == 10 || i == 11)
@@ -518,6 +567,7 @@ void MainWindow::startFrameServer()
     // Cut list constraints come from the index; load the saved list if any.
     m_cutList.setFrames(uint32_t(video->displayOrder.size()), video->keyframes);
     m_timeline->setSource(m_index, video->index);
+    m_playback->setSource(m_file->path(), m_index, video->index);
     if (QFileInfo::exists(m_cutListPath))
         loadCutList(m_cutListPath, true);
 
@@ -533,6 +583,7 @@ void MainWindow::startFrameServer()
 
 void MainWindow::stopFrameServer()
 {
+    m_playback->clear();
     ++m_serverGeneration;
     m_frameServer.reset(); // joins the worker
     for (QAction *a : std::as_const(m_navigationActions))
@@ -597,10 +648,46 @@ void MainWindow::goTo(int64_t pos)
     const PacketIndex::Stream *video = videoIndex();
     if (!video || !m_frameServer)
         return;
+    m_playback->stop(); // any manual move pauses playback
     pos = std::clamp<int64_t>(pos, 0, int64_t(video->displayOrder.size()) - 1);
-    m_position = uint32_t(pos);
+    showPosition(uint32_t(pos));
+}
+
+void MainWindow::showPosition(uint32_t pos)
+{
+    if (!m_frameServer)
+        return;
+    m_position = pos;
     m_timeline->setPlayhead(m_position);
     m_frameServer->request(m_position);
+}
+
+int MainWindow::playbackAudioStream() const
+{
+    // The first audio stream selected for export, else the first one.
+    if (!m_file)
+        return -1;
+    const auto &streams = m_file->streams();
+    for (int s : m_streamPanel->selectedStreams())
+        if (streams[size_t(s)].type == AVMEDIA_TYPE_AUDIO)
+            return s;
+    for (const StreamInfo &s : streams)
+        if (s.type == AVMEDIA_TYPE_AUDIO)
+            return s.index;
+    return -1;
+}
+
+void MainWindow::togglePlayback()
+{
+    if (!m_frameServer)
+        return;
+    if (m_playback->isPlaying()) {
+        m_playback->stop();
+        return;
+    }
+    m_playback->setAudioStream(playbackAudioStream());
+    m_playback->setKeptOnly(m_keptOnlyAction->isChecked(), &m_cutList);
+    m_playback->play(m_position);
 }
 
 void MainWindow::showFrame(const DisplayFrame &frame)

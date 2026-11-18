@@ -178,8 +178,16 @@ bool RandomAccessDecoder::feedPacket(QString *error)
             continue;
         }
 
+        // Position and size identify the packet; the timestamp (modulo the
+        // clock wrap) disambiguates frames sharing one PES.
         const PacketIndex::Packet &want = m_stream->packets[m_nextPacket];
-        const bool matches = m_pkt->size == want.size && (want.pos < 0 || m_pkt->pos == want.pos);
+        bool samePts = true;
+        if (m_pkt->pts != AV_NOPTS_VALUE && want.pts != AV_NOPTS_VALUE) {
+            const int bits = m_avStream->pts_wrap_bits;
+            const int64_t diff = m_pkt->pts - want.pts;
+            samePts = bits > 0 && bits < 63 ? (diff & ((int64_t(1) << bits) - 1)) == 0 : diff == 0;
+        }
+        const bool matches = m_pkt->size == want.size && (want.pos < 0 || m_pkt->pos == want.pos) && samePts;
         if (!m_synced) {
             if (!matches) {
                 const bool passed = want.pos >= 0 && m_pkt->pos > want.pos + kMaxSyncDistance;

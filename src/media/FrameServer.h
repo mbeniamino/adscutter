@@ -39,6 +39,9 @@ public:
 
     void request(uint32_t pos);
     void setDeinterlace(bool enabled); // re-serves the last requested frame
+    // While playing, frames after the last requested one are decoded ahead
+    // into the cache, so that the next request is served immediately.
+    void setPlaying(bool playing);
 
 signals:
     // Emitted from the worker thread.
@@ -55,6 +58,7 @@ private:
     std::optional<uint32_t> m_pending;
     std::optional<uint32_t> m_last;
     bool m_deinterlace = true;
+    bool m_playing = false;
     bool m_stop = false;
 };
 

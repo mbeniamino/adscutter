@@ -235,3 +235,14 @@ foreach c : export_cases
     timeout: 120,
   )
 endforeach
+
+audio_test = executable('audio_test', 'audio_test.cpp',
+  dependencies: media_dep,
+)
+foreach f : ['mpeg2_sd.ts', 'h264_hd.ts', 'hevc_latm.ts', 'h264_aac.mkv', 'jump_forward.ts', 'wrap.ts']
+  test('audio seek ' + f, audio_test,
+    args: [fixture_targets[f]],
+    depends: fixture_targets[f],
+    timeout: 120,
+  )
+endforeach
