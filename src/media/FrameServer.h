@@ -1,5 +1,6 @@
 #pragma once
 
+#include "media/HwDecode.h"
 #include "media/PacketIndex.h"
 
 #include <QImage>
@@ -23,6 +24,7 @@ struct DisplayFrame {
     bool cutPoint = false;
     bool interlaced = false;
     bool deinterlaced = false;
+    QString decoder;        // "Vulkan", "VAAPI" or "software"
 };
 
 // Serves decoded frames from a background thread. Requests are coalesced:
@@ -34,8 +36,8 @@ public:
     explicit FrameServer(QObject *parent = nullptr);
     ~FrameServer() override;
 
-    bool open(const QString &path, int streamIndex, std::shared_ptr<const PacketIndex> index,
-              QString *error);
+    bool open(const QString &path, int streamIndex, std::shared_ptr<const PacketIndex> index, QString *error,
+              HwPreference hardware = HwPreference::Off);
 
     void request(uint32_t pos);
     void setDeinterlace(bool enabled); // re-serves the last requested frame

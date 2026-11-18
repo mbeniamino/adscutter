@@ -29,8 +29,10 @@ RandomAccessDecoder::RandomAccessDecoder() = default;
 RandomAccessDecoder::~RandomAccessDecoder() = default;
 
 bool RandomAccessDecoder::open(const QString &path, int streamIndex,
-                               std::shared_ptr<const PacketIndex> index, QString *error)
+                               std::shared_ptr<const PacketIndex> index, QString *error, HwPreference hardware)
 {
+    m_hwPreference = hardware;
+    m_hwFailed = false;
     auto fail = [&](const QString &why) {
         if (error)
             *error = why;
@@ -56,28 +58,51 @@ bool RandomAccessDecoder::open(const QString &path, int streamIndex,
     const char *name = m_fmt->iformat->name;
     m_byteSeek = std::strcmp(name, "mpegts") == 0 || std::strcmp(name, "mpeg") == 0;
 
-    const AVCodec *codec = avcodec_find_decoder(m_avStream->codecpar->codec_id);
-    if (!codec)
-        return fail(QStringLiteral("No decoder for %1")
-                        .arg(QString::fromUtf8(avcodec_get_name(m_avStream->codecpar->codec_id))));
-    m_codec.reset(avcodec_alloc_context3(codec));
-    if (!m_codec)
-        return fail(QStringLiteral("Out of memory"));
-    int ret = avcodec_parameters_to_context(m_codec.get(), m_avStream->codecpar);
-    if (ret >= 0) {
-        m_codec->pkt_timebase = m_avStream->time_base;
-        m_codec->thread_count = 0;
-        // Frames carry the index of the packet they were decoded from.
-        m_codec->flags |= AV_CODEC_FLAG_COPY_OPAQUE;
-        ret = avcodec_open2(m_codec.get(), codec, nullptr);
-    }
-    if (ret < 0)
-        return fail(QStringLiteral("Cannot open decoder: %1").arg(avErrorString(ret)));
+    if (!openCodec(m_hwPreference, error))
+        return false;
 
     m_pkt.reset(av_packet_alloc());
     m_frame.reset(av_frame_alloc());
     if (!m_pkt || !m_frame)
         return fail(QStringLiteral("Out of memory"));
+    m_runValid = false;
+    return true;
+}
+
+bool RandomAccessDecoder::openCodec(HwPreference preference, QString *error)
+{
+    m_codec.reset();
+    const AVCodec *codec = avcodec_find_decoder(m_avStream->codecpar->codec_id);
+    if (!codec) {
+        if (error)
+            *error = QStringLiteral("No decoder for %1")
+                         .arg(QString::fromUtf8(avcodec_get_name(m_avStream->codecpar->codec_id)));
+        return false;
+    }
+    CodecContextPtr ctx(avcodec_alloc_context3(codec));
+    if (!ctx) {
+        if (error)
+            *error = QStringLiteral("Out of memory");
+        return false;
+    }
+    int ret = avcodec_parameters_to_context(ctx.get(), m_avStream->codecpar);
+    if (ret >= 0) {
+        ctx->pkt_timebase = m_avStream->time_base;
+        // Frames carry the index of the packet they were decoded from.
+        ctx->flags |= AV_CODEC_FLAG_COPY_OPAQUE;
+        // The GPU does the work with hardware decoding: one thread keeps
+        // fewer surfaces in flight. Software decoding uses every core.
+        ctx->thread_count = setupHwDecoding(ctx.get(), codec, preference, &m_hw) ? 1 : 0;
+        ret = avcodec_open2(ctx.get(), codec, nullptr);
+    }
+    if (ret < 0 && m_hw.type != AV_HWDEVICE_TYPE_NONE)
+        return openCodec(HwPreference::Off, error); // the device refused: software
+    if (ret < 0) {
+        if (error)
+            *error = QStringLiteral("Cannot open decoder: %1").arg(avErrorString(ret));
+        return false;
+    }
+    m_codec = std::move(ctx);
     m_runValid = false;
     return true;
 }
@@ -120,7 +145,14 @@ bool RandomAccessDecoder::startRun(uint32_t keyPos, QString *error)
     const uint32_t keyPacket = m_stream->displayOrder[keyPos];
     const PacketIndex::Packet &key = m_stream->packets[keyPacket];
 
-    avcodec_flush_buffers(m_codec.get());
+    // Hardware decoders (seen with HEVC on Vulkan and VAAPI) do not always
+    // restart after the end-of-stream drain: reopen them instead.
+    if (m_inputDone && m_hw.active) {
+        if (!openCodec(m_hwPreference, error))
+            return false;
+    } else {
+        avcodec_flush_buffers(m_codec.get());
+    }
     m_runValid = false;
 
     int ret = -1;
@@ -225,6 +257,21 @@ bool RandomAccessDecoder::feedPacket(QString *error)
 
 FramePtr RandomAccessDecoder::frameAt(uint32_t pos, QString *error)
 {
+    FramePtr frame = decodeFrame(pos, error);
+    if (!frame && m_hw.active) {
+        // Hardware decoding failed on this stream (some devices accept a
+        // stream and then cannot decode it, e.g. some interlaced H.264):
+        // continue in software for good. Cached frames stay valid.
+        m_hwFailed = true;
+        m_hwFailure = QStringLiteral("%1 at frame %2: %3").arg(m_hw.name()).arg(pos).arg(error ? *error : QString());
+        if (openCodec(HwPreference::Off, error))
+            frame = decodeFrame(pos, error);
+    }
+    return frame;
+}
+
+FramePtr RandomAccessDecoder::decodeFrame(uint32_t pos, QString *error)
+{
     if (!m_codec || pos >= frameCount()) {
         if (error)
             *error = QStringLiteral("Frame out of range");
@@ -263,8 +310,22 @@ FramePtr RandomAccessDecoder::frameAt(uint32_t pos, QString *error)
             }
             ++m_stats.decodedFrames;
             m_lastOutput = std::max<int64_t>(m_lastOutput, framePos);
-            FramePtr frame(av_frame_alloc());
-            av_frame_move_ref(frame.get(), m_frame.get());
+            FramePtr frame;
+            if (m_frame->hw_frames_ctx) {
+                // To memory right away: the cache would otherwise exhaust
+                // the device's small surface pool.
+                frame = downloadHwFrame(m_frame.get());
+                av_frame_unref(m_frame.get());
+                if (!frame) {
+                    m_runValid = false;
+                    if (error)
+                        *error = QStringLiteral("Cannot read the hardware decoded frame");
+                    return nullptr;
+                }
+            } else {
+                frame.reset(av_frame_alloc());
+                av_frame_move_ref(frame.get(), m_frame.get());
+            }
 
             if (framePos == int32_t(pos)) {
                 FramePtr result(av_frame_clone(frame.get()));

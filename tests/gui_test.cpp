@@ -18,6 +18,10 @@
 #include <QFile>
 #include <QLabel>
 #include <QMessageBox>
+#include <QMimeData>
+#include <QSettings>
+#include <QTimer>
+#include <QTreeWidget>
 #include <QRegularExpression>
 #include <QTemporaryDir>
 #include <QTest>
@@ -92,7 +96,10 @@ void dragTimeline(Timeline *t, double from, double to)
 
 int main(int argc, char **argv)
 {
-    qputenv("ADSCUTTER_NO_AUDIO", "1"); // tests stay silent
+    qputenv("ADSCUTTER_NO_AUDIO", "1");    // tests stay silent
+    qputenv("ADSCUTTER_HWDEC", "none");    // deterministic pictures
+    QTemporaryDir config;                  // keep settings (recent files...) out of the user's
+    qputenv("XDG_CONFIG_HOME", config.path().toLocal8Bit());
     QApplication app(argc, argv);
     if (argc < 2) {
         std::fprintf(stderr, "usage: %s FILE [SCREENSHOT.png]\n", argv[0]);
@@ -312,11 +319,62 @@ int main(int argc, char **argv)
         std::printf("screenshot: %s\n", argv[2]);
     }
 
+    // --- Recent files, decoder status, shortcuts help --------------------------
+    {
+        const QStringList recent = QSettings().value(QStringLiteral("recentFiles")).toStringList();
+        const bool listed = !recent.isEmpty() && recent.first() == QFileInfo(media).absoluteFilePath();
+        std::printf("%-30s -> %s\n", "recent files", listed ? "recording listed first" : "MISSING");
+        if (!listed) {
+            std::fprintf(stderr, "FAIL: recording not in the recent files\n");
+            ++failures;
+        }
+        bool decoderShown = false;
+        for (const QLabel *l : window->findChildren<QLabel *>())
+            decoderShown |= l->text() == QStringLiteral("Video: software");
+        std::printf("%-30s -> %s\n", "decoder in status bar", decoderShown ? "Video: software" : "MISSING");
+        if (!decoderShown) {
+            std::fprintf(stderr, "FAIL: decoder not shown\n");
+            ++failures;
+        }
+
+        QString found;
+        QTimer::singleShot(300, [&] {
+            if (auto *list = qApp->activeModalWidget() ? qApp->activeModalWidget()->findChild<QTreeWidget *>(QStringLiteral("shortcutList")) : nullptr) {
+                for (QTreeWidgetItemIterator it(list); *it; ++it) {
+                    if ((*it)->text(0).startsWith(QStringLiteral("Mark In")) || (*it)->text(0) == QStringLiteral("Play"))
+                        found += (*it)->text(0).section(QLatin1Char(' '), 0, 1) + QStringLiteral(" = ") + (*it)->text(1) + QStringLiteral("; ");
+                }
+            }
+            if (qApp->activeModalWidget())
+                qApp->activeModalWidget()->close();
+        });
+        key(w, Qt::Key_F1);
+        std::printf("%-30s -> %s\n", "shortcuts help", qPrintable(found));
+        if (!found.contains(QStringLiteral("Mark In = I")) || !found.contains(QStringLiteral("Play = Space"))) {
+            std::fprintf(stderr, "FAIL: shortcuts dialog incomplete\n");
+            ++failures;
+        }
+    }
+
+    // --- Reopen by dropping the file on a new window ---------------------------
     window = std::make_unique<MainWindow>();
     window->show();
-    if (!QTest::qWaitForWindowExposed(window.get()) || !window->openFile(media)) {
+    if (!QTest::qWaitForWindowExposed(window.get())) {
         std::fprintf(stderr, "FAIL: cannot reopen\n");
         return 1;
+    }
+    {
+        QMimeData mime;
+        mime.setUrls({QUrl::fromLocalFile(media)});
+        QDragEnterEvent enter(QPointF(100, 100), Qt::CopyAction, &mime, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(window.get(), &enter);
+        QDropEvent drop(QPointF(100, 100), Qt::CopyAction, &mime, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(window.get(), &drop);
+        std::printf("%-30s -> %s\n", "drop recording on window", enter.isAccepted() ? "accepted" : "REFUSED");
+        if (!enter.isAccepted()) {
+            std::fprintf(stderr, "FAIL: drop refused\n");
+            ++failures;
+        }
     }
     info = window->findChild<QLabel *>(QStringLiteral("positionInfo"));
     expectFrame(info, 1, "reopened");

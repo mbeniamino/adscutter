@@ -3,6 +3,7 @@
 #include "media/ExportJob.h"
 #include "media/FrameDecoder.h"
 #include "media/FrameServer.h"
+#include "media/HwDecode.h"
 #include "media/IndexJob.h"
 #include "media/MediaFile.h"
 #include "media/PacketIndex.h"
@@ -40,6 +41,8 @@ public:
 
 protected:
     void closeEvent(QCloseEvent *event) override;
+    void dragEnterEvent(QDragEnterEvent *event) override;
+    void dropEvent(QDropEvent *event) override;
 
 private slots:
     void openFileDialog();
@@ -66,7 +69,13 @@ private:
     void indexFailed(const QString &error);
 
     void startFrameServer();
+    bool openFrameServer(); // just the decoder thread
+    void restartFrameServer();
     void stopFrameServer();
+    void setHwPreference(HwPreference preference);
+    void addRecentFile(const QString &path);
+    void updateRecentMenu();
+    void showShortcuts();
     void navigate(Step step);
     void goTo(int64_t pos);
     void showPosition(uint32_t pos); // move without stopping playback
@@ -98,6 +107,10 @@ private:
     StreamPanel *m_streamPanel;
     SegmentPanel *m_segmentPanel;
     QLabel *m_statusInfo;
+    QLabel *m_decoderInfo;
+    QMenu *m_recentMenu = nullptr;
+    HwPreference m_hwPreference = HwPreference::Auto;
+    QStringList m_recentFiles;
     QProgressBar *m_indexProgress;
     QToolButton *m_indexCancel;
     QAction *m_rebuildIndexAction = nullptr;

@@ -28,11 +28,11 @@ FrameServer::~FrameServer()
 }
 
 bool FrameServer::open(const QString &path, int streamIndex, std::shared_ptr<const PacketIndex> index,
-                       QString *error)
+                       QString *error, HwPreference hardware)
 {
     Q_ASSERT(!m_thread.joinable());
     auto decoder = std::make_unique<RandomAccessDecoder>();
-    if (!decoder->open(path, streamIndex, std::move(index), error))
+    if (!decoder->open(path, streamIndex, std::move(index), error, hardware))
         return false;
     m_decoder = std::move(decoder);
     m_thread = std::thread([this] { run(); });
@@ -116,6 +116,7 @@ void FrameServer::run()
         out.cutPoint = s.isCutPoint(s.packets[s.displayOrder[pos]]);
         out.interlaced = frame->flags & AV_FRAME_FLAG_INTERLACED;
         out.displayAspect = displayAspect(frame.get(), m_decoder->sampleAspect());
+        out.decoder = m_decoder->decoderName();
 
         const AVFrame *shown = frame.get();
         FramePtr progressive;

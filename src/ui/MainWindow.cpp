@@ -7,7 +7,16 @@
 #include "ui/VideoView.h"
 
 #include <QApplication>
+#include <QActionGroup>
 #include <QCloseEvent>
+#include <QDialog>
+#include <QDialogButtonBox>
+#include <QDragEnterEvent>
+#include <QDropEvent>
+#include <QHeaderView>
+#include <QMimeData>
+#include <QSettings>
+#include <QTreeWidget>
 #include <QDockWidget>
 #include <QFileDialog>
 #include <QFileInfo>
@@ -50,6 +59,7 @@ MainWindow::MainWindow(QWidget *parent)
     , m_streamPanel(new StreamPanel(this))
     , m_segmentPanel(new SegmentPanel(this))
     , m_statusInfo(new QLabel(this))
+    , m_decoderInfo(new QLabel(this))
     , m_indexProgress(new QProgressBar(this))
     , m_indexCancel(new QToolButton(this))
 {
@@ -90,7 +100,15 @@ MainWindow::MainWindow(QWidget *parent)
     statusBar()->addPermanentWidget(m_indexProgress);
     statusBar()->addPermanentWidget(m_indexCancel);
     statusBar()->addPermanentWidget(m_statusInfo);
+    statusBar()->addPermanentWidget(m_decoderInfo);
+    m_decoderInfo->setToolTip(tr("Video decoder used for display (View → Hardware Decoding)"));
     m_lastDir = QStandardPaths::writableLocation(QStandardPaths::MoviesLocation);
+
+    QSettings settings;
+    m_hwPreference = hwPreferenceFromString(settings.value(QStringLiteral("hardwareDecoding"), QStringLiteral("auto")).toString());
+    m_recentFiles = settings.value(QStringLiteral("recentFiles")).toStringList();
+    m_lastDir = settings.value(QStringLiteral("lastDirectory"), m_lastDir).toString();
+    setAcceptDrops(true);
 
     m_playback = new PlaybackController(this);
     connect(m_playback, &PlaybackController::positionChanged, this, [this](quint32 pos) { showPosition(pos); });
@@ -121,6 +139,8 @@ MainWindow::MainWindow(QWidget *parent)
     createMenus();
     updateTitle();
     resize(1100, 800);
+    restoreGeometry(settings.value(QStringLiteral("geometry")).toByteArray());
+    restoreState(settings.value(QStringLiteral("windowState")).toByteArray());
 }
 
 MainWindow::~MainWindow()
@@ -267,6 +287,8 @@ void MainWindow::createMenus()
 {
     QMenu *fileMenu = menuBar()->addMenu(tr("&File"));
     fileMenu->addAction(tr("&Open Recording…"), QKeySequence::Open, this, &MainWindow::openFileDialog);
+    m_recentMenu = fileMenu->addMenu(tr("Open &Recent"));
+    updateRecentMenu();
     m_rebuildIndexAction = fileMenu->addAction(tr("Re&build Index"), this, &MainWindow::rebuildIndex);
     m_rebuildIndexAction->setEnabled(false);
     fileMenu->addSeparator();
@@ -303,6 +325,26 @@ void MainWindow::createMenus()
 
     QMenu *viewMenu = menuBar()->addMenu(tr("&View"));
     viewMenu->addAction(m_deinterlaceAction);
+    QMenu *hwMenu = viewMenu->addMenu(tr("&Hardware Decoding"));
+    auto *hwGroup = new QActionGroup(this);
+    const std::pair<HwPreference, QString> hwChoices[] = {
+        {HwPreference::Auto, tr("&Automatic (Vulkan, then VAAPI)")},
+        {HwPreference::Vulkan, tr("&Vulkan")},
+        {HwPreference::Vaapi, tr("V&AAPI")},
+        {HwPreference::Off, tr("&Off (software)")},
+    };
+    for (const auto &[preference, text] : hwChoices) {
+        QAction *a = hwMenu->addAction(text);
+        a->setCheckable(true);
+        a->setChecked(preference == m_hwPreference);
+        hwGroup->addAction(a);
+        const HwPreference choice = preference;
+        connect(a, &QAction::triggered, this, [this, choice] { setHwPreference(choice); });
+    }
+    if (qEnvironmentVariableIsSet("ADSCUTTER_HWDEC")) {
+        hwMenu->setEnabled(false);
+        hwMenu->setToolTip(tr("Set by the ADSCUTTER_HWDEC environment variable"));
+    }
     viewMenu->addSeparator();
     QAction *zoomIn = viewMenu->addAction(tr("Zoom &In Timeline"), QKeySequence::ZoomIn, m_timeline, &Timeline::zoomIn);
     QAction *zoomOut = viewMenu->addAction(tr("Zoom &Out Timeline"), QKeySequence::ZoomOut, m_timeline, &Timeline::zoomOut);
@@ -313,6 +355,7 @@ void MainWindow::createMenus()
     }
 
     QMenu *helpMenu = menuBar()->addMenu(tr("&Help"));
+    helpMenu->addAction(tr("&Keyboard Shortcuts"), QKeySequence::HelpContents, this, &MainWindow::showShortcuts);
     helpMenu->addAction(tr("&About AdsCutter"), this, &MainWindow::showAbout);
 }
 
@@ -329,6 +372,118 @@ void MainWindow::openFileDialog()
     openFile(path);
 }
 
+void MainWindow::dragEnterEvent(QDragEnterEvent *event)
+{
+    const QList<QUrl> urls = event->mimeData()->urls();
+    if (!urls.isEmpty() && urls.first().isLocalFile())
+        event->acceptProposedAction();
+}
+
+void MainWindow::dropEvent(QDropEvent *event)
+{
+    const QList<QUrl> urls = event->mimeData()->urls();
+    if (urls.isEmpty() || !urls.first().isLocalFile())
+        return;
+    const QString path = urls.first().toLocalFile();
+    event->acceptProposedAction();
+    // A cut list dropped on an open recording is loaded; anything else is
+    // opened as a recording.
+    if (path.endsWith(QStringLiteral(".json"), Qt::CaseInsensitive) && videoIndex())
+        loadCutList(path, false);
+    else
+        openFile(path);
+}
+
+void MainWindow::addRecentFile(const QString &path)
+{
+    const QString absolute = QFileInfo(path).absoluteFilePath();
+    m_recentFiles.removeAll(absolute);
+    m_recentFiles.prepend(absolute);
+    while (m_recentFiles.size() > 10)
+        m_recentFiles.removeLast();
+    QSettings settings;
+    settings.setValue(QStringLiteral("recentFiles"), m_recentFiles);
+    settings.setValue(QStringLiteral("lastDirectory"), m_lastDir);
+    updateRecentMenu();
+}
+
+void MainWindow::updateRecentMenu()
+{
+    if (!m_recentMenu)
+        return;
+    m_recentMenu->clear();
+    for (int i = 0; i < m_recentFiles.size(); ++i) {
+        const QString path = m_recentFiles[i];
+        QAction *a = m_recentMenu->addAction(QStringLiteral("&%1 %2").arg((i + 1) % 10).arg(QFileInfo(path).fileName()),
+                                             this, [this, path] { openFile(path); });
+        a->setToolTip(path);
+        a->setEnabled(QFileInfo::exists(path));
+    }
+    if (!m_recentFiles.isEmpty()) {
+        m_recentMenu->addSeparator();
+        m_recentMenu->addAction(tr("&Clear List"), this, [this] {
+            m_recentFiles.clear();
+            QSettings().setValue(QStringLiteral("recentFiles"), m_recentFiles);
+            updateRecentMenu();
+        });
+    }
+    m_recentMenu->setEnabled(!m_recentFiles.isEmpty());
+}
+
+void MainWindow::showShortcuts()
+{
+    // Built from the menus, so it always matches the actual key bindings.
+    QDialog dialog(this);
+    dialog.setWindowTitle(tr("Keyboard Shortcuts"));
+    auto *layout = new QVBoxLayout(&dialog);
+    auto *tree = new QTreeWidget(&dialog);
+    tree->setObjectName(QStringLiteral("shortcutList"));
+    tree->setHeaderLabels({tr("Action"), tr("Shortcut")});
+    tree->setRootIsDecorated(false);
+    std::function<void(QMenu *, QTreeWidgetItem *)> addMenu = [&](QMenu *menu, QTreeWidgetItem *group) {
+        for (QAction *a : menu->actions()) {
+            if (a->menu()) {
+                addMenu(a->menu(), group);
+            } else if (!a->shortcut().isEmpty()) {
+                auto *item = new QTreeWidgetItem(group);
+                item->setText(0, QString(a->text()).remove(QLatin1Char('&')));
+                QStringList keys;
+                for (const QKeySequence &k : a->shortcuts())
+                    keys << k.toString(QKeySequence::NativeText);
+                item->setText(1, keys.join(QStringLiteral(", ")));
+            }
+        }
+    };
+    for (QAction *top : menuBar()->actions()) {
+        if (!top->menu())
+            continue;
+        auto *group = new QTreeWidgetItem(tree);
+        group->setText(0, QString(top->text()).remove(QLatin1Char('&')));
+        QFont bold = group->font(0);
+        bold.setBold(true);
+        group->setFont(0, bold);
+        group->setFirstColumnSpanned(true);
+        addMenu(top->menu(), group);
+        if (group->childCount() == 0)
+            delete group;
+    }
+    tree->expandAll();
+    tree->header()->setSectionResizeMode(QHeaderView::ResizeToContents);
+    layout->addWidget(tree);
+    auto *mouse = new QLabel(tr("<b>Timeline</b>: click or drag to move · drag a segment edge to adjust it · "
+                                "wheel to zoom · Shift+wheel to scroll · the bottom strip shows the whole "
+                                "recording.<br><b>Files</b>: drop a recording on the window to open it, or a "
+                                "cut list to load it."),
+                             &dialog);
+    mouse->setWordWrap(true);
+    layout->addWidget(mouse);
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Close, &dialog);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    layout->addWidget(buttons);
+    dialog.resize(560, 640);
+    dialog.exec();
+}
+
 void MainWindow::closeEvent(QCloseEvent *event)
 {
     if (m_exportJob
@@ -337,10 +492,14 @@ void MainWindow::closeEvent(QCloseEvent *event)
         event->ignore();
         return;
     }
-    if (maybeSave())
+    if (maybeSave()) {
+        QSettings settings;
+        settings.setValue(QStringLiteral("geometry"), saveGeometry());
+        settings.setValue(QStringLiteral("windowState"), saveState());
         event->accept();
-    else
+    } else {
         event->ignore();
+    }
 }
 
 bool MainWindow::closeFile()
@@ -365,6 +524,7 @@ bool MainWindow::closeFile()
     m_videoView->clear(tr("Open a recording with File → Open…"));
     m_navigation->setInfo({});
     m_statusInfo->clear();
+    m_decoderInfo->clear();
     cutListChanged();
     return true;
 }
@@ -386,6 +546,7 @@ bool MainWindow::openFile(const QString &path)
 
     m_file = std::move(file);
     m_cutListPath = defaultCutListPath(path);
+    addRecentFile(path);
     m_streamPanel->setStreams(m_file->streams(), m_file->bestVideoStream());
     updateTitle();
     m_statusInfo->setText(QStringLiteral("%1 · %2").arg(m_file->formatName(), formatDuration(m_file->duration())));
@@ -542,26 +703,8 @@ void MainWindow::startFrameServer()
 {
     stopFrameServer();
     const PacketIndex::Stream *video = videoIndex();
-    if (!video)
+    if (!video || !openFrameServer())
         return;
-
-    auto server = std::make_unique<FrameServer>();
-    QString error;
-    if (!server->open(m_file->path(), video->index, m_index, &error)) {
-        QMessageBox::warning(this, tr("Cannot decode video"), error);
-        return;
-    }
-    const unsigned generation = ++m_serverGeneration;
-    connect(server.get(), &FrameServer::frameReady, this, [this, generation](const DisplayFrame &frame) {
-        if (generation == m_serverGeneration)
-            showFrame(frame);
-    });
-    connect(server.get(), &FrameServer::frameFailed, this, [this, generation](quint32 pos, const QString &error) {
-        if (generation == m_serverGeneration)
-            statusBar()->showMessage(tr("Frame %1: %2").arg(pos).arg(error), 5000);
-    });
-    server->setDeinterlace(m_deinterlaceAction->isChecked());
-    m_frameServer = std::move(server);
     m_previewDecoder.reset();
 
     // Cut list constraints come from the index; load the saved list if any.
@@ -579,6 +722,52 @@ void MainWindow::startFrameServer()
     m_position = 0;
     m_timeline->setPlayhead(0);
     m_frameServer->request(0);
+}
+
+void MainWindow::setHwPreference(HwPreference preference)
+{
+    if (preference == m_hwPreference)
+        return;
+    m_hwPreference = preference;
+    QSettings().setValue(QStringLiteral("hardwareDecoding"), hwPreferenceName(preference));
+    restartFrameServer();
+}
+
+void MainWindow::restartFrameServer()
+{
+    if (!m_frameServer)
+        return;
+    m_playback->stop();
+    ++m_serverGeneration;
+    m_frameServer.reset();
+    if (openFrameServer())
+        m_frameServer->request(m_position);
+}
+
+bool MainWindow::openFrameServer()
+{
+    const PacketIndex::Stream *video = videoIndex();
+    if (!video)
+        return false;
+    auto server = std::make_unique<FrameServer>();
+    QString error;
+    if (!server->open(m_file->path(), video->index, m_index, &error, effectiveHwPreference(m_hwPreference))) {
+        QMessageBox::warning(this, tr("Cannot decode video"), error);
+        return false;
+    }
+    const unsigned generation = ++m_serverGeneration;
+    connect(server.get(), &FrameServer::frameReady, this, [this, generation](const DisplayFrame &frame) {
+        if (generation == m_serverGeneration)
+            showFrame(frame);
+    });
+    connect(server.get(), &FrameServer::frameFailed, this, [this, generation](quint32 pos, const QString &error) {
+        if (generation == m_serverGeneration)
+            statusBar()->showMessage(tr("Frame %1: %2").arg(pos).arg(error), 5000);
+    });
+    server->setDeinterlace(m_deinterlaceAction->isChecked());
+    m_frameServer = std::move(server);
+    m_decoderInfo->clear();
+    return true;
 }
 
 void MainWindow::stopFrameServer()
@@ -696,6 +885,7 @@ void MainWindow::showFrame(const DisplayFrame &frame)
     if (!video)
         return;
     m_videoView->setFrame(frame.image, frame.displayAspect);
+    m_decoderInfo->setText(tr("Video: %1").arg(frame.decoder));
 
     QString kind = QString(QLatin1Char(frame.pictureType));
     if (frame.cutPoint)

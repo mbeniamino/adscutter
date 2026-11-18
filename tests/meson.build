@@ -71,6 +71,13 @@ fixtures += [
   ['wrap.ts', '720x576', h264_sd[0], h264_sd[1],
    ['-f', 'mpegts', '-output_ts_offset', '95440'],
    '720', '576', '1.7778', []],
+  # 1080i H.264 (MBAFF, top field first), as on DVB-T HD channels.
+  ['h264_1080i.ts', '1920x1080',
+   ['-c:v', 'libx264', '-preset', 'veryfast', '-b:v', '8M', '-flags', '+ildct+ilme',
+    '-x264-params', 'tff=1:open-gop=1:keyint=25'],
+   ['-c:a', 'mp2', '-b:a', '128k'],
+   ['-f', 'mpegts'],
+   '1920', '1080', '1.7778', []],
   # Halves of the stream-restart recordings below.
   ['part_low.ts', '720x576', h264_sd[0], h264_sd[1],
    ['-f', 'mpegts'],
@@ -245,4 +252,19 @@ foreach f : ['mpeg2_sd.ts', 'h264_hd.ts', 'hevc_latm.ts', 'h264_aac.mkv', 'jump_
     depends: fixture_targets[f],
     timeout: 120,
   )
+endforeach
+
+# Hardware decoding: skipped (exit 77) where the backend is not available.
+hw_test = executable('hw_test', 'hw_test.cpp',
+  dependencies: media_dep,
+)
+foreach backend : ['vulkan', 'vaapi']
+  foreach f : ['h264_hd.ts', 'h264_1080i.ts', 'hevc_latm.ts', 'h264_aac.mkv', 'mpeg2_sd.ts']
+    test('hw ' + backend + ' ' + f, hw_test,
+      args: [fixture_targets[f], backend],
+      depends: fixture_targets[f],
+      timeout: 180,
+      is_parallel: false, # one GPU, shared
+    )
+  endforeach
 endforeach

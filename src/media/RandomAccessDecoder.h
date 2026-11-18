@@ -1,6 +1,7 @@
 #pragma once
 
 #include "media/FFmpegUtil.h"
+#include "media/HwDecode.h"
 #include "media/PacketIndex.h"
 
 #include <list>
@@ -25,8 +26,14 @@ public:
     RandomAccessDecoder(const RandomAccessDecoder &) = delete;
     RandomAccessDecoder &operator=(const RandomAccessDecoder &) = delete;
 
-    bool open(const QString &path, int streamIndex, std::shared_ptr<const PacketIndex> index,
-              QString *error);
+    // Hardware decoding is off unless asked for: it is not guaranteed to be
+    // bit identical to FFmpeg's software decoders.
+    bool open(const QString &path, int streamIndex, std::shared_ptr<const PacketIndex> index, QString *error,
+              HwPreference hardware = HwPreference::Off);
+    // "Vulkan", "VAAPI" or "software" (known after the first frame).
+    QString decoderName() const { return m_hw.name(); }
+    bool hardwareFailed() const { return m_hwFailed; }
+    const QString &hardwareFailure() const { return m_hwFailure; } // why it fell back
 
     const PacketIndex &index() const { return *m_index; }
     const PacketIndex::Stream &stream() const { return *m_stream; }
@@ -50,6 +57,8 @@ public:
     const Stats &stats() const { return m_stats; }
 
 private:
+    bool openCodec(HwPreference preference, QString *error);
+    FramePtr decodeFrame(uint32_t pos, QString *error);
     bool startRun(uint32_t keyPos, QString *error);
     // Reads packets until one video packet was sent to the decoder.
     // Returns false on error; sets m_inputDone at the end of the file.
@@ -66,6 +75,10 @@ private:
     FramePtr m_frame;
     AVRational m_sampleAspect{0, 1};
     bool m_byteSeek = false;
+    HwPreference m_hwPreference = HwPreference::Off;
+    HwDecodeState m_hw; // address handed to the codec context
+    bool m_hwFailed = false;
+    QString m_hwFailure;
 
     // Current decoding run: started at cut point m_runFirstPos and fed
     // sequentially from there in decode order.
