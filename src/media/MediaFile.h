@@ -42,7 +42,14 @@ struct StreamInfo {
     QString details() const;
 };
 
-// An opened, probed input file. Owns the demuxer context.
+// Opens and probes an input file with the settings used throughout the app,
+// so that every context opened on the same file sees the same streams.
+// extraOptions (not consumed) are passed to the demuxer on top of the defaults.
+FormatContextPtr openFormatContext(const QString &path, QString *error,
+                                   const AVDictionary *extraOptions = nullptr);
+
+// An opened, probed input file. Owns the demuxer context until it is handed
+// over (e.g. to the indexer, which can reuse the already probed packets).
 class MediaFile {
 public:
     MediaFile() = default;
@@ -52,20 +59,24 @@ public:
     // Opens and probes the file. On failure returns false and sets *error.
     bool open(const QString &path, QString *error);
 
-    bool isOpen() const { return m_fmt != nullptr; }
+    bool isOpen() const { return !m_path.isEmpty(); }
     const QString &path() const { return m_path; }
-    QString formatName() const;
-    // Duration in seconds, or a negative value if unknown.
-    double duration() const;
+    const QString &formatName() const { return m_formatName; }
+    // Duration reported by the container in seconds, or negative if unknown.
+    double duration() const { return m_duration; }
     const std::vector<StreamInfo> &streams() const { return m_streams; }
     // Index of the main video stream, or -1 if the file has no video.
     int bestVideoStream() const { return m_bestVideo; }
 
+    // Null after takeFormatContext().
     AVFormatContext *formatContext() const { return m_fmt.get(); }
+    FormatContextPtr takeFormatContext() { return std::move(m_fmt); }
 
 private:
     FormatContextPtr m_fmt;
     QString m_path;
+    QString m_formatName;
+    double m_duration = -1.0;
     std::vector<StreamInfo> m_streams;
     int m_bestVideo = -1;
 };

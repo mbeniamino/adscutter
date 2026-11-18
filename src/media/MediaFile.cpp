@@ -104,14 +104,10 @@ QString StreamInfo::details() const
     return parts.join(QStringLiteral(", "));
 }
 
-bool MediaFile::open(const QString &path, QString *error)
+FormatContextPtr openFormatContext(const QString &path, QString *error, const AVDictionary *extraOptions)
 {
-    m_fmt.reset();
-    m_streams.clear();
-    m_bestVideo = -1;
-    m_path.clear();
-
     AVDictionary *opts = nullptr;
+    av_dict_copy(&opts, extraOptions, 0);
     // TV recordings may announce streams (e.g. subtitles) late: probe more
     // than the default so the stream list is complete.
     av_dict_set(&opts, "probesize", "50000000", 0);
@@ -124,7 +120,7 @@ bool MediaFile::open(const QString &path, QString *error)
     if (ret < 0) {
         if (error)
             *error = QStringLiteral("Cannot open file: %1").arg(avErrorString(ret));
-        return false;
+        return nullptr;
     }
     FormatContextPtr fmt(raw);
 
@@ -132,8 +128,23 @@ bool MediaFile::open(const QString &path, QString *error)
     if (ret < 0) {
         if (error)
             *error = QStringLiteral("Cannot read stream information: %1").arg(avErrorString(ret));
-        return false;
+        return nullptr;
     }
+    return fmt;
+}
+
+bool MediaFile::open(const QString &path, QString *error)
+{
+    m_fmt.reset();
+    m_streams.clear();
+    m_bestVideo = -1;
+    m_path.clear();
+    m_formatName.clear();
+    m_duration = -1.0;
+
+    FormatContextPtr fmt = openFormatContext(path, error);
+    if (!fmt)
+        return false;
 
     std::vector<int> programOf(fmt->nb_streams, -1);
     if (fmt->nb_programs > 1) {
@@ -186,24 +197,15 @@ bool MediaFile::open(const QString &path, QString *error)
     const int best = av_find_best_stream(fmt.get(), AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
     m_bestVideo = best >= 0 ? best : -1;
 
+    if (fmt->iformat)
+        m_formatName = QString::fromUtf8(fmt->iformat->long_name ? fmt->iformat->long_name
+                                                                 : fmt->iformat->name);
+    if (fmt->duration != AV_NOPTS_VALUE)
+        m_duration = double(fmt->duration) / AV_TIME_BASE;
+
     m_fmt = std::move(fmt);
     m_path = path;
     return true;
-}
-
-QString MediaFile::formatName() const
-{
-    if (!m_fmt || !m_fmt->iformat)
-        return {};
-    return QString::fromUtf8(m_fmt->iformat->long_name ? m_fmt->iformat->long_name
-                                                       : m_fmt->iformat->name);
-}
-
-double MediaFile::duration() const
-{
-    if (!m_fmt || m_fmt->duration == AV_NOPTS_VALUE)
-        return -1.0;
-    return double(m_fmt->duration) / AV_TIME_BASE;
 }
 
 } // namespace adscutter

@@ -9,6 +9,9 @@ endif
 probe_test = executable('probe_test', 'probe_test.cpp',
   dependencies: media_dep,
 )
+index_test = executable('index_test', 'index_test.cpp',
+  dependencies: media_dep,
+)
 
 common_in = [
   '-hide_banner', '-loglevel', 'error', '-y',
@@ -50,6 +53,29 @@ fixtures = [
    '1024', '576', '1.7778', []],
 ]
 
+# H.264 + MP2 in MPEG-TS, the base for the timestamp tests below.
+h264_sd = [
+  ['-c:v', 'libx264', '-preset', 'ultrafast', '-bf', '2', '-g', '25',
+   '-x264-params', 'open-gop=1:repeat-headers=1', '-aspect', '16:9'],
+  ['-c:a', 'mp2', '-b:a', '128k'],
+]
+
+# 6 s files starting about 2.3 s before the 33-bit PTS clock wraps
+# (2^33 / 90 kHz = 95443.7 s; the muxer adds 1.4 s of delay).
+fixtures += [
+  ['wrap.ts', '720x576', h264_sd[0], h264_sd[1],
+   ['-f', 'mpegts', '-output_ts_offset', '95440'],
+   '720', '576', '1.7778', []],
+  # Halves of the stream-restart recordings below.
+  ['part_low.ts', '720x576', h264_sd[0], h264_sd[1],
+   ['-f', 'mpegts'],
+   '720', '576', '1.7778', []],
+  ['part_high.ts', '720x576', h264_sd[0], h264_sd[1],
+   ['-f', 'mpegts', '-output_ts_offset', '5000'],
+   '720', '576', '1.7778', []],
+]
+
+fixture_targets = {}
 foreach f : fixtures
   input_args = []
   foreach a : common_in
@@ -60,9 +86,61 @@ foreach f : fixtures
     command: [ffmpeg] + input_args + f[2] + f[3] + f[4] + ['@OUTPUT@'],
     build_by_default: false,
   )
+  fixture_targets += {f[0]: fixture}
   test('probe ' + f[0], probe_test,
     args: [fixture, f[5], f[6], f[7]] + f[8],
     depends: fixture,
     timeout: 60,
   )
 endforeach
+
+# A channel restarting its encoder mid-recording: the clock jumps forward
+# or backward by more than an hour.
+cat = find_program('cat')
+fixture_targets += {
+  'jump_forward.ts': custom_target('jump_forward.ts',
+    input: [fixture_targets['part_low.ts'], fixture_targets['part_high.ts']],
+    output: 'jump_forward.ts',
+    command: [cat, '@INPUT@'],
+    capture: true,
+    build_by_default: false,
+  ),
+  'jump_backward.ts': custom_target('jump_backward.ts',
+    input: [fixture_targets['part_high.ts'], fixture_targets['part_low.ts']],
+    output: 'jump_backward.ts',
+    command: [cat, '@INPUT@'],
+    capture: true,
+    build_by_default: false,
+  ),
+}
+
+# file, frames, duration (s), discontinuities, extra args
+index_cases = [
+  ['mpeg2_sd.ts', '150', '6.0', '0', []],
+  ['h264_hd.ts', '150', '6.0', '0', []],
+  ['hevc_latm.ts', '150', '6.0', '0', []],
+  ['h264_aac.mkv', '150', '6.0', '0', []],
+  ['wrap.ts', '150', '6.0', '0', []],
+  # libavformat normally unwraps the clock itself; make sure the index
+  # copes when it does not.
+  ['wrap.ts', '150', '6.0', '0', ['--raw-timestamps']],
+  ['jump_forward.ts', '300', '12.0', '1', []],
+  ['jump_backward.ts', '300', '12.0', '1', []],
+]
+foreach c : index_cases
+  fixture = fixture_targets[c[0]]
+  test('index ' + c[0] + (c[4].length() > 0 ? ' ' + ' '.join(c[4]) : ''), index_test,
+    args: [fixture, c[1], c[2], c[3]] + c[4],
+    depends: fixture,
+    timeout: 120,
+  )
+endforeach
+
+job_test = executable('job_test', 'job_test.cpp',
+  dependencies: media_dep,
+)
+test('index job + cache', job_test,
+  args: [fixture_targets['h264_hd.ts']],
+  depends: fixture_targets['h264_hd.ts'],
+  timeout: 60,
+)

@@ -3,12 +3,17 @@
 
 namespace adscutter {
 
-bool FrameDecoder::open(MediaFile &file, int streamIndex, QString *error)
+bool FrameDecoder::open(const MediaFile &file, int streamIndex, QString *error)
 {
     m_codec.reset();
     m_sws.reset();
-    m_fmt = file.formatContext();
-    if (!m_fmt || streamIndex < 0 || unsigned(streamIndex) >= m_fmt->nb_streams) {
+    m_stream = nullptr;
+    m_fmt = openFormatContext(file.path(), error);
+    if (!m_fmt)
+        return false;
+    if (streamIndex < 0 || unsigned(streamIndex) >= m_fmt->nb_streams
+        || unsigned(streamIndex) >= file.streams().size()
+        || m_fmt->streams[streamIndex]->codecpar->codec_id != file.streams()[streamIndex].codecId) {
         if (error)
             *error = QStringLiteral("Invalid video stream");
         return false;
@@ -81,7 +86,7 @@ std::optional<DecodedFrame> FrameDecoder::decodeNextFrame(QString *error)
             continue;
 
         // Decoder needs more input.
-        ret = av_read_frame(m_fmt, pkt.get());
+        ret = av_read_frame(m_fmt.get(), pkt.get());
         if (ret == AVERROR_EOF) {
             avcodec_send_packet(m_codec.get(), nullptr);
             flushing = true;
@@ -137,7 +142,7 @@ std::optional<DecodedFrame> FrameDecoder::convert(const AVFrame *frame)
     out.keyframe = frame->flags & AV_FRAME_FLAG_KEY;
     out.interlaced = frame->flags & AV_FRAME_FLAG_INTERLACED;
 
-    AVRational sar = av_guess_sample_aspect_ratio(m_fmt, m_stream, const_cast<AVFrame *>(frame));
+    AVRational sar = av_guess_sample_aspect_ratio(m_fmt.get(), m_stream, const_cast<AVFrame *>(frame));
     if (sar.num <= 0 || sar.den <= 0)
         sar = AVRational{1, 1};
     out.displayAspect = double(frame->width) * sar.num / (double(frame->height) * sar.den);

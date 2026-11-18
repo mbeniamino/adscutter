@@ -2,6 +2,8 @@
 
 // Small RAII helpers and conversions around the FFmpeg C API.
 
+#include <cstdint> // before FFmpeg headers: they need UINT64_C in C++
+
 extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>

@@ -24,8 +24,17 @@ inc = include_directories('src')
 # Media layer: no widgets, so it can be used by tests and future CLI tools.
 media_lib = static_library('adscutter-media',
   files(
-    'src/media/MediaFile.cpp',
+    'src/media/Bitstream.cpp',
     'src/media/FrameDecoder.cpp',
+    'src/media/IndexBuilder.cpp',
+    'src/media/IndexJob.cpp',
+    'src/media/MediaFile.cpp',
+    'src/media/PacketIndex.cpp',
+  ),
+  qt6.compile_moc(
+    headers: files('src/media/IndexJob.h'),
+    include_directories: inc,
+    dependencies: qt_core_gui,
   ),
   include_directories: inc,
   dependencies: [qt_core_gui] + av_deps,

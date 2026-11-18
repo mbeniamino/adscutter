@@ -19,15 +19,18 @@ struct DecodedFrame {
 
 // Decodes frames of one video stream of a MediaFile.
 //
-// Milestone 1 only supports decoding the first displayable frame; seeking
-// and the GOP cache arrive with frame-accurate navigation (milestone 3).
+// The decoder opens its own demuxer on the file, independent from the one
+// used by the indexer, so both can run at the same time.
+//
+// Only decoding from the start is supported so far; seeking and the GOP
+// cache arrive with frame-accurate navigation (milestone 3).
 class FrameDecoder {
 public:
     FrameDecoder() = default;
     FrameDecoder(const FrameDecoder &) = delete;
     FrameDecoder &operator=(const FrameDecoder &) = delete;
 
-    bool open(MediaFile &file, int streamIndex, QString *error);
+    bool open(const MediaFile &file, int streamIndex, QString *error);
 
     // Reads from the current demuxer position until a frame is produced.
     std::optional<DecodedFrame> decodeNextFrame(QString *error);
@@ -35,7 +38,7 @@ public:
 private:
     std::optional<DecodedFrame> convert(const AVFrame *frame);
 
-    AVFormatContext *m_fmt = nullptr; // owned by MediaFile
+    FormatContextPtr m_fmt;
     AVStream *m_stream = nullptr;
     CodecContextPtr m_codec;
     SwsContextPtr m_sws;
