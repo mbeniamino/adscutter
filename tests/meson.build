@@ -6,6 +6,11 @@ if not ffmpeg.found()
   subdir_done()
 endif
 
+cutlist_test = executable('cutlist_test', 'cutlist_test.cpp',
+  dependencies: media_dep,
+)
+test('cut list model', cutlist_test)
+
 probe_test = executable('probe_test', 'probe_test.cpp',
   dependencies: media_dep,
 )

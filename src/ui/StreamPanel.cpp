@@ -89,4 +89,20 @@ std::vector<int> StreamPanel::selectedStreams() const
     return result;
 }
 
+void StreamPanel::setSelectedStreams(const std::vector<int> &streams)
+{
+    {
+        QSignalBlocker blocker(m_tree);
+        for (int i = 0; i < m_tree->topLevelItemCount(); ++i) {
+            QTreeWidgetItem *item = m_tree->topLevelItem(i);
+            if (!(item->flags() & Qt::ItemIsUserCheckable))
+                continue;
+            const int index = item->data(ColIndex, Qt::UserRole).toInt();
+            const bool on = std::find(streams.begin(), streams.end(), index) != streams.end();
+            item->setCheckState(ColIndex, on ? Qt::Checked : Qt::Unchecked);
+        }
+    }
+    emit selectionChanged();
+}
+
 } // namespace adscutter

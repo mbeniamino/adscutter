@@ -5,6 +5,7 @@
 #include "media/IndexJob.h"
 #include "media/MediaFile.h"
 #include "media/PacketIndex.h"
+#include "model/CutList.h"
 
 #include <QMainWindow>
 #include <memory>
@@ -16,7 +17,9 @@ class QToolButton;
 namespace adscutter {
 
 class NavigationBar;
+class SegmentPanel;
 class StreamPanel;
+class Timeline;
 class VideoView;
 
 class MainWindow : public QMainWindow {
@@ -26,6 +29,11 @@ public:
     ~MainWindow() override;
 
     bool openFile(const QString &path);
+    const CutList &cutList() const { return m_cutList; }
+    QString cutListPath() const { return m_cutListPath; }
+
+protected:
+    void closeEvent(QCloseEvent *event) override;
 
 private slots:
     void openFileDialog();
@@ -40,11 +48,12 @@ private:
         Back10s, Forward10s,
         Back1min, Forward1min,
         Start, End,
+        PreviousBoundary, NextBoundary,
     };
 
     void createActions();
     void createMenus();
-    void closeFile();
+    bool closeFile(); // false if the user canceled (unsaved changes)
     void startIndexing(FormatContextPtr fmt, bool useCache);
     void stopIndexing();
     void indexFinished();
@@ -57,15 +66,34 @@ private:
     void showFrame(const DisplayFrame &frame);
     const PacketIndex::Stream *videoIndex() const;
 
+    // Cut list editing
+    void markIn();
+    void markOut();
+    void deleteSegment();
+    void undo();
+    void redo();
+    void cutListChanged();
+    bool saveCutList(bool chooseFile);
+    void openCutListDialog();
+    bool loadCutList(const QString &path, bool quiet);
+    bool maybeSave();
+    void updateTitle();
+    int64_t frameDurationUs() const;
+
     VideoView *m_videoView;
+    Timeline *m_timeline;
     NavigationBar *m_navigation;
     StreamPanel *m_streamPanel;
+    SegmentPanel *m_segmentPanel;
     QLabel *m_statusInfo;
     QProgressBar *m_indexProgress;
     QToolButton *m_indexCancel;
     QAction *m_rebuildIndexAction = nullptr;
     QAction *m_deinterlaceAction = nullptr;
+    QAction *m_undoAction = nullptr;
+    QAction *m_redoAction = nullptr;
     QList<QAction *> m_navigationActions;
+    QList<QAction *> m_editActions; // enabled once the index is ready
 
     std::unique_ptr<MediaFile> m_file;
     std::unique_ptr<FrameDecoder> m_previewDecoder; // first frame, before the index is ready
@@ -76,6 +104,9 @@ private:
     unsigned m_indexGeneration = 0;
     unsigned m_serverGeneration = 0;
     uint32_t m_position = 0; // last requested frame (display order position)
+
+    CutList m_cutList;
+    QString m_cutListPath;
     QString m_lastDir;
 };
 

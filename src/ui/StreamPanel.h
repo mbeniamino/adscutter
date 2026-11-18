@@ -19,6 +19,7 @@ public:
     void setStreams(const std::vector<StreamInfo> &streams, int mainVideo);
     void clear();
     std::vector<int> selectedStreams() const;
+    void setSelectedStreams(const std::vector<int> &streams); // only exportable ones
 
 signals:
     void selectionChanged();
