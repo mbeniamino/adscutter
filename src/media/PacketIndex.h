@@ -67,6 +67,7 @@ public:
         // Derived by finalize(), not stored in the cache:
         std::vector<uint32_t> displayOrder; // packet indices sorted by presentation time
         std::vector<uint32_t> keyframes;    // positions in displayOrder that are cut points
+        std::vector<int32_t> displayPosOf;  // packet index -> position in displayOrder, -1 if not shown
 
         bool isCutPoint(const Packet &p) const
         {
@@ -84,6 +85,16 @@ public:
     // Unified end time of the last presented packet of all streams.
     int64_t durationUs() const { return m_durationUs; }
     size_t discontinuities() const;
+
+    // Navigation helpers on the displayOrder positions of a stream.
+    int64_t frameTime(const Stream &s, uint32_t pos) const { return unifiedPts(s, s.displayOrder[pos]); }
+    // First position shown at or after the unified time (clamped to the last frame).
+    uint32_t positionAtTime(const Stream &s, int64_t timeUs) const;
+    // Cut point at or before pos.
+    static uint32_t keyframeAtOrBefore(const Stream &s, uint32_t pos);
+    // Next cut point after pos / previous one before pos; pos itself if none.
+    static uint32_t nextKeyframe(const Stream &s, uint32_t pos);
+    static uint32_t previousKeyframe(const Stream &s, uint32_t pos);
 
     // Computes the derived data. Must be called after building or loading.
     void finalize();

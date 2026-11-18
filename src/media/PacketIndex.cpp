@@ -78,6 +78,7 @@ void PacketIndex::finalize()
     for (Stream &s : m_streams) {
         s.displayOrder.clear();
         s.keyframes.clear();
+        s.displayPosOf.assign(s.packets.size(), -1);
         if (s.segments.empty())
             s.segments.push_back({0, 0});
 
@@ -116,6 +117,9 @@ void PacketIndex::finalize()
             return rawUnified(s, s.packets[a]) < rawUnified(s, s.packets[b]);
         });
 
+        for (uint32_t pos = 0; pos < s.displayOrder.size(); ++pos)
+            s.displayPosOf[s.displayOrder[pos]] = int32_t(pos);
+
         if (video) {
             for (uint32_t pos = 0; pos < s.displayOrder.size(); ++pos) {
                 if (s.isCutPoint(s.packets[s.displayOrder[pos]]))
@@ -137,6 +141,36 @@ void PacketIndex::finalize()
 
     m_originUs = origin == INT64_MAX ? 0 : origin;
     m_durationUs = end == INT64_MIN ? 0 : end - m_originUs;
+}
+
+uint32_t PacketIndex::positionAtTime(const Stream &s, int64_t timeUs) const
+{
+    if (s.displayOrder.empty())
+        return 0;
+    // displayOrder is sorted by unified time.
+    auto it = std::partition_point(s.displayOrder.begin(), s.displayOrder.end(),
+                                   [&](uint32_t packet) { return unifiedPts(s, packet) < timeUs; });
+    if (it == s.displayOrder.end())
+        --it;
+    return uint32_t(it - s.displayOrder.begin());
+}
+
+uint32_t PacketIndex::keyframeAtOrBefore(const Stream &s, uint32_t pos)
+{
+    auto it = std::upper_bound(s.keyframes.begin(), s.keyframes.end(), pos);
+    return it == s.keyframes.begin() ? 0 : *(it - 1);
+}
+
+uint32_t PacketIndex::nextKeyframe(const Stream &s, uint32_t pos)
+{
+    auto it = std::upper_bound(s.keyframes.begin(), s.keyframes.end(), pos);
+    return it == s.keyframes.end() ? pos : *it;
+}
+
+uint32_t PacketIndex::previousKeyframe(const Stream &s, uint32_t pos)
+{
+    auto it = std::lower_bound(s.keyframes.begin(), s.keyframes.end(), pos);
+    return it == s.keyframes.begin() ? pos : *(it - 1);
 }
 
 QString PacketIndex::cachePath(const QString &mediaPath, const QString &cacheDir)

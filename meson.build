@@ -25,14 +25,18 @@ inc = include_directories('src')
 media_lib = static_library('adscutter-media',
   files(
     'src/media/Bitstream.cpp',
+    'src/media/Deinterlace.cpp',
+    'src/media/FrameConverter.cpp',
     'src/media/FrameDecoder.cpp',
+    'src/media/FrameServer.cpp',
     'src/media/IndexBuilder.cpp',
     'src/media/IndexJob.cpp',
     'src/media/MediaFile.cpp',
     'src/media/PacketIndex.cpp',
+    'src/media/RandomAccessDecoder.cpp',
   ),
   qt6.compile_moc(
-    headers: files('src/media/IndexJob.h'),
+    headers: files('src/media/FrameServer.h', 'src/media/IndexJob.h'),
     include_directories: inc,
     dependencies: qt_core_gui,
   ),
@@ -48,6 +52,7 @@ media_dep = declare_dependency(
 ui_moc = qt6.compile_moc(
   headers: files(
     'src/ui/MainWindow.h',
+    'src/ui/NavigationBar.h',
     'src/ui/VideoView.h',
     'src/ui/StreamPanel.h',
   ),
@@ -55,16 +60,26 @@ ui_moc = qt6.compile_moc(
   dependencies: qt_widgets,
 )
 
-executable('adscutter',
+ui_lib = static_library('adscutter-ui',
   files(
-    'src/main.cpp',
     'src/ui/MainWindow.cpp',
+    'src/ui/NavigationBar.cpp',
     'src/ui/VideoView.cpp',
     'src/ui/StreamPanel.cpp',
   ),
   ui_moc,
   include_directories: inc,
   dependencies: [media_dep, qt_widgets],
+)
+ui_dep = declare_dependency(
+  link_with: ui_lib,
+  include_directories: inc,
+  dependencies: [media_dep, qt_widgets],
+)
+
+executable('adscutter',
+  files('src/main.cpp'),
+  dependencies: ui_dep,
   install: true,
 )
 

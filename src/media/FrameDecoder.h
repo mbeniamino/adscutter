@@ -1,6 +1,7 @@
 #pragma once
 
 #include "media/FFmpegUtil.h"
+#include "media/FrameConverter.h"
 
 #include <QImage>
 #include <optional>
@@ -22,8 +23,8 @@ struct DecodedFrame {
 // The decoder opens its own demuxer on the file, independent from the one
 // used by the indexer, so both can run at the same time.
 //
-// Only decoding from the start is supported so far; seeking and the GOP
-// cache arrive with frame-accurate navigation (milestone 3).
+// Sequential decoding from the start of the file, used to show a preview
+// before the index is ready. Random access is RandomAccessDecoder's job.
 class FrameDecoder {
 public:
     FrameDecoder() = default;
@@ -41,9 +42,7 @@ private:
     FormatContextPtr m_fmt;
     AVStream *m_stream = nullptr;
     CodecContextPtr m_codec;
-    SwsContextPtr m_sws;
-    int m_swsWidth = 0, m_swsHeight = 0;
-    AVPixelFormat m_swsFormat = AV_PIX_FMT_NONE;
+    FrameConverter m_converter;
 };
 
 } // namespace adscutter

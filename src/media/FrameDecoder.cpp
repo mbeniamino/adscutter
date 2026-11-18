@@ -6,7 +6,6 @@ namespace adscutter {
 bool FrameDecoder::open(const MediaFile &file, int streamIndex, QString *error)
 {
     m_codec.reset();
-    m_sws.reset();
     m_stream = nullptr;
     m_fmt = openFormatContext(file.path(), error);
     if (!m_fmt)
@@ -114,38 +113,14 @@ std::optional<DecodedFrame> FrameDecoder::decodeNextFrame(QString *error)
 
 std::optional<DecodedFrame> FrameDecoder::convert(const AVFrame *frame)
 {
-    const auto format = AVPixelFormat(frame->format);
-    if (!m_sws || frame->width != m_swsWidth || frame->height != m_swsHeight
-        || format != m_swsFormat) {
-        m_sws.reset(sws_getContext(frame->width, frame->height, format,
-                                   frame->width, frame->height, AV_PIX_FMT_RGB32,
-                                   SWS_BILINEAR, nullptr, nullptr, nullptr));
-        if (!m_sws)
-            return std::nullopt;
-        m_swsWidth = frame->width;
-        m_swsHeight = frame->height;
-        m_swsFormat = format;
-    }
-
-    // AV_PIX_FMT_RGB32 is native-endian 0xAARRGGBB, which is exactly
-    // QImage::Format_RGB32.
-    QImage image(frame->width, frame->height, QImage::Format_RGB32);
-    if (image.isNull())
-        return std::nullopt;
-    uint8_t *dst[4] = {image.bits(), nullptr, nullptr, nullptr};
-    int dstStride[4] = {int(image.bytesPerLine()), 0, 0, 0};
-    sws_scale(m_sws.get(), frame->data, frame->linesize, 0, frame->height, dst, dstStride);
-
     DecodedFrame out;
-    out.image = std::move(image);
+    out.image = m_converter.toImage(frame);
+    if (out.image.isNull())
+        return std::nullopt;
     out.pts = frame->best_effort_timestamp;
     out.keyframe = frame->flags & AV_FRAME_FLAG_KEY;
     out.interlaced = frame->flags & AV_FRAME_FLAG_INTERLACED;
-
-    AVRational sar = av_guess_sample_aspect_ratio(m_fmt.get(), m_stream, const_cast<AVFrame *>(frame));
-    if (sar.num <= 0 || sar.den <= 0)
-        sar = AVRational{1, 1};
-    out.displayAspect = double(frame->width) * sar.num / (double(frame->height) * sar.den);
+    out.displayAspect = displayAspect(frame, av_guess_sample_aspect_ratio(m_fmt.get(), m_stream, nullptr));
     return out;
 }
 

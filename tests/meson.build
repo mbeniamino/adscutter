@@ -144,3 +144,32 @@ test('index job + cache', job_test,
   depends: fixture_targets['h264_hd.ts'],
   timeout: 60,
 )
+
+seek_test = executable('seek_test', 'seek_test.cpp',
+  dependencies: media_dep,
+)
+foreach f : ['mpeg2_sd.ts', 'h264_hd.ts', 'hevc_latm.ts', 'h264_aac.mkv', 'wrap.ts',
+             'jump_forward.ts', 'jump_backward.ts']
+  test('seek ' + f, seek_test,
+    args: [fixture_targets[f]],
+    depends: fixture_targets[f],
+    timeout: 180,
+  )
+endforeach
+
+qt_test = dependency('qt6', modules: ['Test'], required: false)
+if qt_test.found()
+  gui_test = executable('gui_test', 'gui_test.cpp',
+    dependencies: [ui_dep, qt_test],
+  )
+  gui_env = environment()
+  gui_env.set('QT_QPA_PLATFORM', 'offscreen')
+  # Keep test indexes out of the user's cache.
+  gui_env.set('XDG_CACHE_HOME', meson.current_build_dir() / 'cache')
+  test('gui navigation', gui_test,
+    args: [fixture_targets['mpeg2_sd.ts']],
+    depends: fixture_targets['mpeg2_sd.ts'],
+    env: gui_env,
+    timeout: 60,
+  )
+endif
