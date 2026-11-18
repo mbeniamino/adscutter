@@ -9,12 +9,14 @@
 // usage: gui_test FILE [SCREENSHOT.png]
 // Run with QT_QPA_PLATFORM=offscreen.
 
+#include "TestUtil.h"
 #include "ui/MainWindow.h"
 #include "ui/Timeline.h"
 
 #include <QApplication>
 #include <QFile>
 #include <QLabel>
+#include <QMessageBox>
 #include <QRegularExpression>
 #include <QTemporaryDir>
 #include <QTest>
@@ -218,6 +220,30 @@ int main(int argc, char **argv)
         ++failures;
     }
     std::printf("%-30s -> %s\n", "saved", qPrintable(QFileInfo(cutList).fileName()));
+
+    // --- Export -----------------------------------------------------------------
+    const QString exported = dir.filePath(QStringLiteral("recording.cut.mkv"));
+    if (!window->startExport(exported)) {
+        std::fprintf(stderr, "FAIL: export did not start\n");
+        ++failures;
+    }
+    const bool exportDone = QTest::qWaitFor([&] { return !window->isExporting(); }, 30000);
+    auto *result = window->findChild<QMessageBox *>(QStringLiteral("exportResult"));
+    std::printf("%-30s -> %s\n", "export", result ? qPrintable(result->windowTitle()) : "no result dialog");
+    if (!exportDone || !result || result->windowTitle() != QStringLiteral("Export complete")) {
+        std::fprintf(stderr, "FAIL: export did not complete: %s\n", result ? qPrintable(result->text()) : "");
+        ++failures;
+    }
+    if (result)
+        result->close();
+    // Segments [24,44] and [60,149]: 21 + 90 frames, plus P frame 45 which
+    // B frame 44 depends on (reported as one extra frame).
+    const auto decoded = test::decodeAll(exported, 0);
+    std::printf("%-30s -> %zu frames\n", "exported file", decoded.hashes.size());
+    if (decoded.hashes.size() != 112) {
+        std::fprintf(stderr, "FAIL: exported file should have 112 frames\n");
+        ++failures;
+    }
 
     if (argc >= 3) {
         key(w, Qt::Key_Home);

@@ -14,6 +14,7 @@
 #include <QMenuBar>
 #include <QMessageBox>
 #include <QProgressBar>
+#include <QProgressDialog>
 #include <QStandardPaths>
 #include <QStatusBar>
 #include <QTime>
@@ -113,6 +114,7 @@ MainWindow::MainWindow(QWidget *parent)
 MainWindow::~MainWindow()
 {
     // Stop the worker threads before the widgets they report to go away.
+    stopExport();
     stopFrameServer();
     stopIndexing();
 }
@@ -226,7 +228,10 @@ void MainWindow::createMenus()
     QAction *openList = fileMenu->addAction(tr("Open &Cut List…"), this, &MainWindow::openCutListDialog);
     QAction *save = fileMenu->addAction(tr("&Save Cut List"), QKeySequence::Save, this, [this] { saveCutList(false); });
     QAction *saveAs = fileMenu->addAction(tr("Save Cut List &As…"), QKeySequence::SaveAs, this, [this] { saveCutList(true); });
-    for (QAction *a : {openList, save, saveAs}) {
+    fileMenu->addSeparator();
+    QAction *exportAction = fileMenu->addAction(tr("&Export…"), QKeySequence(Qt::CTRL | Qt::Key_E), this,
+                                                &MainWindow::exportDialog);
+    for (QAction *a : {openList, save, saveAs, exportAction}) {
         a->setEnabled(false);
         m_editActions << a;
     }
@@ -277,6 +282,12 @@ void MainWindow::openFileDialog()
 
 void MainWindow::closeEvent(QCloseEvent *event)
 {
+    if (m_exportJob
+        && QMessageBox::question(this, tr("Export running"), tr("An export is running. Cancel it and quit?"))
+               != QMessageBox::Yes) {
+        event->ignore();
+        return;
+    }
     if (maybeSave())
         event->accept();
     else
@@ -287,6 +298,11 @@ bool MainWindow::closeFile()
 {
     if (!maybeSave())
         return false;
+    if (m_exportJob
+        && QMessageBox::question(this, tr("Export running"), tr("An export is running. Cancel it?"))
+               != QMessageBox::Yes)
+        return false;
+    stopExport();
     stopFrameServer();
     stopIndexing();
     m_index.reset();
@@ -790,6 +806,111 @@ bool MainWindow::maybeSave()
     if (answer == QMessageBox::Save)
         return saveCutList(false);
     return answer == QMessageBox::Discard;
+}
+
+// --- Export --------------------------------------------------------------------
+
+void MainWindow::exportDialog()
+{
+    if (!m_file)
+        return;
+    const QFileInfo input(m_file->path());
+    QString path = QFileDialog::getSaveFileName(
+        this, tr("Export"), input.absolutePath() + QLatin1Char('/') + input.completeBaseName() + QStringLiteral(".cut.mkv"),
+        tr("Matroska video (*.mkv)"));
+    if (path.isEmpty())
+        return;
+    if (!path.endsWith(QStringLiteral(".mkv"), Qt::CaseInsensitive))
+        path += QStringLiteral(".mkv");
+    startExport(path);
+}
+
+bool MainWindow::startExport(const QString &outputPath)
+{
+    const PacketIndex::Stream *video = videoIndex();
+    if (!video || m_exportJob)
+        return false;
+    if (m_cutList.isEmpty()) {
+        QMessageBox::information(this, tr("Nothing to export"),
+                                 tr("Mark the parts to keep first: I at the start, O at the end of each part."));
+        return false;
+    }
+    ExportSettings settings;
+    settings.outputPath = outputPath;
+    settings.videoStream = video->index;
+    settings.streams = m_streamPanel->selectedStreams();
+    settings.segments = m_cutList.segments();
+    settings.frameDurationUs = frameDurationUs();
+    if (settings.streams.empty()) {
+        QMessageBox::information(this, tr("Nothing to export"), tr("Select at least one stream in the Streams panel."));
+        return false;
+    }
+    if (QFileInfo(outputPath).absoluteFilePath() == QFileInfo(m_file->path()).absoluteFilePath()) {
+        QMessageBox::warning(this, tr("Cannot export"), tr("The output file cannot be the recording itself."));
+        return false;
+    }
+
+    m_exportJob = std::make_unique<ExportJob>();
+    m_exportProgress = new QProgressDialog(tr("Exporting to %1…").arg(QFileInfo(outputPath).fileName()), tr("Cancel"),
+                                           0, 1000, this);
+    m_exportProgress->setWindowTitle(tr("Export"));
+    m_exportProgress->setWindowModality(Qt::WindowModal);
+    m_exportProgress->setMinimumDuration(0);
+    m_exportProgress->setAutoClose(false);
+    m_exportProgress->setAutoReset(false);
+    m_exportProgress->setValue(0);
+    connect(m_exportProgress, &QProgressDialog::canceled, m_exportJob.get(), &ExportJob::cancel);
+    connect(m_exportJob.get(), &ExportJob::progress, m_exportProgress,
+            [dialog = m_exportProgress](double fraction) { dialog->setValue(int(fraction * 1000)); });
+    connect(m_exportJob.get(), &ExportJob::finished, this, [this, outputPath] { exportFinished(outputPath); });
+    m_exportJob->start(m_file->path(), m_index, settings);
+    return true;
+}
+
+void MainWindow::stopExport()
+{
+    if (m_exportProgress) {
+        m_exportProgress->disconnect(this);
+        m_exportProgress->deleteLater();
+        m_exportProgress = nullptr;
+    }
+    m_exportJob.reset(); // cancels and waits; a canceled export leaves no file
+}
+
+void MainWindow::exportFinished(const QString &outputPath)
+{
+    if (!m_exportJob)
+        return;
+    const bool ok = m_exportJob->succeeded();
+    const bool canceled = m_exportJob->canceled();
+    const QString error = m_exportJob->error();
+    const ExportReport report = m_exportJob->report();
+    stopExport();
+
+    if (canceled) {
+        statusBar()->showMessage(tr("Export canceled"), 5000);
+        return;
+    }
+    auto *box = new QMessageBox(this);
+    box->setAttribute(Qt::WA_DeleteOnClose);
+    box->setObjectName(QStringLiteral("exportResult"));
+    if (!ok) {
+        box->setIcon(QMessageBox::Warning);
+        box->setWindowTitle(tr("Export failed"));
+        box->setText(error);
+    } else {
+        const double mb = QFileInfo(outputPath).size() / 1e6;
+        QString text = tr("Exported %n segment(s), %1 in total, to %2 (%3 MB).", nullptr, int(report.segments.size()))
+                           .arg(formatTime(report.durationUs), QFileInfo(outputPath).fileName())
+                           .arg(mb, 0, 'f', 1);
+        for (const QString &w : report.warnings)
+            text += QStringLiteral("\n\n") + w;
+        box->setIcon(report.warnings.isEmpty() ? QMessageBox::Information : QMessageBox::Warning);
+        box->setWindowTitle(tr("Export complete"));
+        box->setText(text);
+        statusBar()->showMessage(tr("Exported to %1").arg(outputPath), 8000);
+    }
+    box->open();
 }
 
 void MainWindow::showAbout()

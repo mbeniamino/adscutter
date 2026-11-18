@@ -228,6 +228,68 @@ FrameClass classifyMpeg12(const uint8_t *data, size_t size)
 
 } // namespace
 
+std::vector<uint8_t> extractParamSets(AVCodecID codec, const uint8_t *data, size_t size, int lengthSize)
+{
+    std::vector<uint8_t> out;
+    if (!data || size == 0)
+        return out;
+
+    if (codec == AV_CODEC_ID_MPEG1VIDEO || codec == AV_CODEC_ID_MPEG2VIDEO) {
+        // Sequence header followed by its extension/user data start codes,
+        // up to the GOP header or the first picture.
+        size_t start = size;
+        for (size_t i = 0; i + 4 <= size; ++i) {
+            if (data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 1) {
+                const uint8_t code = data[i + 3];
+                if (start == size) {
+                    if (code == 0xb3)
+                        start = i;
+                } else if (code != 0xb5 && code != 0xb2) {
+                    out.assign(data + start, data + i);
+                    return out;
+                }
+                i += 3;
+            }
+        }
+        if (start < size)
+            out.assign(data + start, data + size);
+        return out;
+    }
+
+    const bool h264 = codec == AV_CODEC_ID_H264;
+    if (!h264 && codec != AV_CODEC_ID_HEVC)
+        return out;
+    forEachNal(data, size, lengthSize, [&](const uint8_t *nal, size_t len) {
+        const int type = h264 ? (nal[0] & 0x1f) : ((nal[0] >> 1) & 0x3f);
+        const bool wanted = h264 ? (type == 7 || type == 8 || type == 13) : (type >= 32 && type <= 34);
+        if (wanted) {
+            if (lengthSize > 0) {
+                for (int b = lengthSize - 1; b >= 0; --b)
+                    out.push_back(uint8_t(len >> (8 * b)));
+            } else {
+                out.insert(out.end(), {0, 0, 0, 1});
+            }
+            out.insert(out.end(), nal, nal + len);
+        }
+        return true;
+    });
+    return out;
+}
+
+bool hevcCraToBla(uint8_t *data, size_t size, int lengthSize)
+{
+    bool changed = false;
+    forEachNal(data, size, lengthSize, [&](const uint8_t *nal, size_t len) {
+        if (len >= 2 && ((nal[0] >> 1) & 0x3f) == 21) { // CRA_NUT
+            auto *p = const_cast<uint8_t *>(nal);   // the caller owns writable data
+            p[0] = uint8_t((p[0] & 0x81) | (16 << 1)); // BLA_W_LP
+            changed = true;
+        }
+        return true;
+    });
+    return changed;
+}
+
 int nalLengthSize(AVCodecID codec, const uint8_t *extradata, int extradataSize)
 {
     if (!extradata || extradataSize < 1 || extradata[0] != 1)

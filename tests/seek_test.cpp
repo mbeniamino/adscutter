@@ -16,6 +16,7 @@
 #include "media/IndexBuilder.h"
 #include "media/MediaFile.h"
 #include "media/RandomAccessDecoder.h"
+#include "TestUtil.h"
 
 #include <QCryptographicHash>
 #include <cstdarg>
@@ -47,49 +48,11 @@ int failures = 0;
     ++failures;
 }
 
-QByteArray hashFrame(const AVFrame *f)
-{
-    QCryptographicHash h(QCryptographicHash::Md5);
-    const AVPixFmtDescriptor *desc = av_pix_fmt_desc_get(AVPixelFormat(f->format));
-    const int planes = av_pix_fmt_count_planes(AVPixelFormat(f->format));
-    for (int p = 0; p < planes; ++p) {
-        const int lineBytes = av_image_get_linesize(AVPixelFormat(f->format), f->width, p);
-        const int rows = (p == 1 || p == 2) ? AV_CEIL_RSHIFT(f->height, desc->log2_chroma_h) : f->height;
-        for (int y = 0; y < rows; ++y)
-            h.addData(QByteArrayView(f->data[p] + ptrdiff_t(f->linesize[p]) * y, lineBytes));
-    }
-    return h.result();
-}
+using test::hashFrame;
 
 std::vector<QByteArray> referenceHashes(const QString &path, int streamIndex)
 {
-    std::vector<QByteArray> hashes;
-    QString error;
-    FormatContextPtr fmt = openFormatContext(path, &error);
-    const AVStream *st = fmt->streams[streamIndex];
-    const AVCodec *codec = avcodec_find_decoder(st->codecpar->codec_id);
-    CodecContextPtr ctx(avcodec_alloc_context3(codec));
-    avcodec_parameters_to_context(ctx.get(), st->codecpar);
-    ctx->pkt_timebase = st->time_base;
-    avcodec_open2(ctx.get(), codec, nullptr);
-    PacketPtr pkt(av_packet_alloc());
-    FramePtr frame(av_frame_alloc());
-    auto drain = [&] {
-        while (avcodec_receive_frame(ctx.get(), frame.get()) >= 0) {
-            hashes.push_back(hashFrame(frame.get()));
-            av_frame_unref(frame.get());
-        }
-    };
-    while (av_read_frame(fmt.get(), pkt.get()) >= 0) {
-        if (pkt->stream_index == streamIndex) {
-            avcodec_send_packet(ctx.get(), pkt.get());
-            drain();
-        }
-        av_packet_unref(pkt.get());
-    }
-    avcodec_send_packet(ctx.get(), nullptr);
-    drain();
-    return hashes;
+    return test::decodeAll(path, streamIndex).hashes;
 }
 
 struct Checker {

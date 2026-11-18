@@ -82,6 +82,8 @@ public:
     // Presentation time of a packet on the unified timeline, in microseconds,
     // or AV_NOPTS_VALUE.
     int64_t unifiedPts(const Stream &s, uint32_t packet) const;
+    // Decode time on the unified timeline (falls back to the pts).
+    int64_t unifiedDts(const Stream &s, uint32_t packet) const;
     // Unified end time of the last presented packet of all streams.
     int64_t durationUs() const { return m_durationUs; }
     size_t discontinuities() const;

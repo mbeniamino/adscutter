@@ -1,5 +1,6 @@
 #pragma once
 
+#include "media/ExportJob.h"
 #include "media/FrameDecoder.h"
 #include "media/FrameServer.h"
 #include "media/IndexJob.h"
@@ -12,6 +13,7 @@
 
 class QLabel;
 class QProgressBar;
+class QProgressDialog;
 class QToolButton;
 
 namespace adscutter {
@@ -31,6 +33,9 @@ public:
     bool openFile(const QString &path);
     const CutList &cutList() const { return m_cutList; }
     QString cutListPath() const { return m_cutListPath; }
+    // Exports the kept segments of the selected streams (in the background).
+    bool startExport(const QString &outputPath);
+    bool isExporting() const { return m_exportJob != nullptr; }
 
 protected:
     void closeEvent(QCloseEvent *event) override;
@@ -77,6 +82,9 @@ private:
     void openCutListDialog();
     bool loadCutList(const QString &path, bool quiet);
     bool maybeSave();
+    void exportDialog();
+    void exportFinished(const QString &outputPath);
+    void stopExport();
     void updateTitle();
     int64_t frameDurationUs() const;
 
@@ -100,6 +108,8 @@ private:
     std::unique_ptr<IndexJob> m_indexJob;
     std::shared_ptr<const PacketIndex> m_index;
     std::unique_ptr<FrameServer> m_frameServer;
+    std::unique_ptr<ExportJob> m_exportJob;
+    QProgressDialog *m_exportProgress = nullptr;
     // Bumped whenever a job is replaced, so late signals of an old job are ignored.
     unsigned m_indexGeneration = 0;
     unsigned m_serverGeneration = 0;

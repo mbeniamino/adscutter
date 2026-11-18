@@ -99,6 +99,18 @@ foreach f : fixtures
   )
 endforeach
 
+# H.264 with SPS/PPS only at the start of the stream (later ones hidden):
+# cut segments need them re-inserted.
+python = find_program('python3')
+fixture_targets += {
+  'h264_noparams.ts': custom_target('h264_noparams.ts',
+    input: fixture_targets['part_low.ts'],
+    output: 'h264_noparams.ts',
+    command: [python, '-I', files('neutralize_params.py'), '@INPUT@', '@OUTPUT@'],
+    build_by_default: false,
+  ),
+}
+
 # A channel restarting its encoder mid-recording: the clock jumps forward
 # or backward by more than an hour.
 cat = find_program('cat')
@@ -178,3 +190,30 @@ if qt_test.found()
     timeout: 60,
   )
 endif
+
+export_test = executable('export_test', 'export_test.cpp',
+  dependencies: media_dep,
+)
+# file, segments (in-out display positions, ins snapped back to cut points), streams
+export_cases = [
+  ['mpeg2_sd.ts', '17-39,62-149', ''],
+  ['mpeg2_sd.ts', '0-149', ''],
+  ['h264_hd.ts', '30-70,100-149', ''],
+  ['h264_noparams.ts', '30-70,100-149', ''],
+  ['hevc_latm.ts', '30-70,100-140', '0'],
+  ['h264_aac.mkv', '10-80,110-149', ''],
+  ['wrap.ts', '10-140', ''],
+  ['jump_forward.ts', '100-200,250-299', ''],
+  ['jump_backward.ts', '120-180', ''],
+]
+foreach c : export_cases
+  args = [fixture_targets[c[0]], c[1]]
+  if c[2] != ''
+    args += c[2]
+  endif
+  test('export ' + c[0] + ' ' + c[1], export_test,
+    args: args,
+    depends: fixture_targets[c[0]],
+    timeout: 120,
+  )
+endforeach

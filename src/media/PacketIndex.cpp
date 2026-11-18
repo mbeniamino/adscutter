@@ -62,6 +62,15 @@ int64_t PacketIndex::unifiedPts(const Stream &s, uint32_t packet) const
     return t == AV_NOPTS_VALUE ? t : t - m_originUs;
 }
 
+int64_t PacketIndex::unifiedDts(const Stream &s, uint32_t packet) const
+{
+    const Packet &p = s.packets[packet];
+    const int64_t ts = p.dts != AV_NOPTS_VALUE ? p.dts : p.pts;
+    if (ts == AV_NOPTS_VALUE)
+        return AV_NOPTS_VALUE;
+    return av_rescale_q(ts, s.timeBase, AV_TIME_BASE_Q) + s.segments[p.segment].offsetUs - m_originUs;
+}
+
 size_t PacketIndex::discontinuities() const
 {
     size_t n = 0;
