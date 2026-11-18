@@ -1,5 +1,6 @@
 #pragma once
 
+#include "analysis/AnalysisJob.h"
 #include "media/ExportJob.h"
 #include "media/FrameDecoder.h"
 #include "media/FrameServer.h"
@@ -38,6 +39,10 @@ public:
     // Exports the kept segments of the selected streams (in the background).
     bool startExport(const QString &outputPath);
     bool isExporting() const { return m_exportJob != nullptr; }
+    // Starts the analysis of the open recording (in the background).
+    bool startAnalysis();
+    bool isAnalyzing() const { return m_analysisJob != nullptr; }
+    const std::vector<BreakRegion> &breaks() const { return m_breaks; }
 
 protected:
     void closeEvent(QCloseEvent *event) override;
@@ -76,6 +81,10 @@ private:
     void addRecentFile(const QString &path);
     void updateRecentMenu();
     void showShortcuts();
+    void stopAnalysis();
+    void analysisFinished();
+    void setAnalysis(std::unique_ptr<AnalysisData> analysis);
+    void jumpToBreak(bool forward, bool separators);
     void navigate(Step step);
     void goTo(int64_t pos);
     void showPosition(uint32_t pos); // move without stopping playback
@@ -130,6 +139,12 @@ private:
     std::shared_ptr<const PacketIndex> m_index;
     std::unique_ptr<FrameServer> m_frameServer;
     std::unique_ptr<ExportJob> m_exportJob;
+    std::unique_ptr<AnalysisJob> m_analysisJob;
+    std::unique_ptr<AnalysisData> m_analysis;
+    std::vector<BreakCandidate> m_candidates;
+    std::vector<BreakRegion> m_breaks;
+    QProgressBar *m_analysisProgress = nullptr;
+    QToolButton *m_analysisCancel = nullptr;
     QProgressDialog *m_exportProgress = nullptr;
     // Bumped whenever a job is replaced, so late signals of an old job are ignored.
     unsigned m_indexGeneration = 0;

@@ -400,8 +400,11 @@ int main(int argc, char **argv)
                     fail("subtitles %d: wrong cues", s);
                 continue;
             }
-            const int64_t dur = sp.empty() ? 0 : sp.front().second - sp.front().first;
-            std::printf("  audio %d: %zu packets (%zu matched to source bytes), frame %.1f ms\n", s, sp.size(),
+            // Longest frame: some codecs (Vorbis) vary the frame length.
+            int64_t dur = 0;
+            for (const auto &[a, b] : sp)
+                dur = std::max(dur, b - a);
+            std::printf("  audio %d: %zu packets (%zu matched to source bytes), longest frame %.1f ms\n", s, sp.size(),
                         matched[s], dur / 1e3);
             if (matched[s] == 0)
                 checkDecodedAudio(path, *index, sourceOf[s], settings.outputPath, s, timing);

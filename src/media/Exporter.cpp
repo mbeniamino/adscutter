@@ -47,14 +47,6 @@ int64_t typicalDuration(const PacketIndex &index, const PacketIndex::Stream &s, 
     return steps[steps.size() / 2];
 }
 
-// First position in displayOrder whose unified pts is >= t.
-uint32_t firstAtOrAfter(const PacketIndex &index, const PacketIndex::Stream &s, int64_t t)
-{
-    auto it = std::partition_point(s.displayOrder.begin(), s.displayOrder.end(),
-                                   [&](uint32_t p) { return index.unifiedPts(s, p) < t; });
-    return uint32_t(it - s.displayOrder.begin());
-}
-
 } // namespace
 
 bool exportMatroska(const QString &inputPath, const PacketIndex &index, const ExportSettings &settings,
@@ -191,14 +183,33 @@ bool exportMatroska(const QString &inputPath, const PacketIndex &index, const Ex
             continue;
         const bool audio = p.index->type == AVMEDIA_TYPE_AUDIO;
         p.frameDurationUs = audio ? typicalDuration(index, *p.index, 24000) : 0;
-        const int64_t half = p.frameDurationUs / 2;
+        const auto &order = p.index->displayOrder;
+        // Audio: frames whose middle falls inside the segment, using each
+        // frame's own duration (up to the next one): Vorbis, for one,
+        // switches between short and long frames. Others (subtitles): those
+        // starting inside it.
+        auto anchor = [&](uint32_t pos) {
+            const int64_t start = index.unifiedPts(*p.index, order[pos]);
+            if (!audio)
+                return start;
+            const int64_t next = pos + 1 < order.size() ? index.unifiedPts(*p.index, order[pos + 1])
+                                                         : start + p.frameDurationUs;
+            const int64_t duration = next > start && next - start <= 4 * p.frameDurationUs ? next - start
+                                                                                           : p.frameDurationUs;
+            return start + duration / 2;
+        };
         for (size_t si = 0; si < segPlans.size(); ++si) {
-            // Audio: frames whose middle falls inside the segment. Others
-            // (subtitles): those starting inside it.
-            const uint32_t from = firstAtOrAfter(index, *p.index, segPlans[si].startUs - half);
-            const uint32_t to = firstAtOrAfter(index, *p.index, segPlans[si].endUs - half);
+            auto firstFrom = [&](int64_t t) {
+                return uint32_t(std::partition_point(order.begin(), order.end(),
+                                                     [&](const uint32_t &packet) {
+                                                         return anchor(uint32_t(&packet - order.data())) < t;
+                                                     })
+                                - order.begin());
+            };
+            const uint32_t from = firstFrom(segPlans[si].startUs);
+            const uint32_t to = firstFrom(segPlans[si].endUs);
             for (uint32_t pos = from; pos < to; ++pos) {
-                p.segmentOf[p.index->displayOrder[pos]] = int32_t(si);
+                p.segmentOf[order[pos]] = int32_t(si);
                 ++p.planned;
             }
         }

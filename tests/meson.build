@@ -135,6 +135,17 @@ fixture_targets += {
   ),
 }
 
+# A short recording shaped like Canale 5: fades, spot separators,
+# semi-transparent logo with a "PRIMA"/"MEDIASET" text, 50 fps, Vorbis.
+fixture_targets += {
+  'broadcast_like.mkv': custom_target('broadcast_like.mkv',
+    output: 'broadcast_like.mkv',
+    command: [python, '-I', files('make_broadcast_like.py'), ffmpeg, '@OUTPUT@'],
+    depend_files: files('make_broadcast_like.py'),
+    build_by_default: false,
+  ),
+}
+
 # A channel restarting its encoder mid-recording: the clock jumps forward
 # or backward by more than an hour.
 cat = find_program('cat')
@@ -190,7 +201,7 @@ seek_test = executable('seek_test', 'seek_test.cpp',
   dependencies: media_dep,
 )
 foreach f : ['mpeg2_sd.ts', 'h264_hd.ts', 'hevc_latm.ts', 'h264_aac.mkv', 'wrap.ts',
-             'jump_forward.ts', 'jump_backward.ts']
+             'jump_forward.ts', 'jump_backward.ts', 'broadcast_like.mkv']
   test('seek ' + f, seek_test,
     args: [fixture_targets[f]],
     depends: fixture_targets[f],
@@ -227,6 +238,7 @@ export_cases = [
   ['hevc_latm.ts', '30-70,100-140', ''],
   ['h264_aac.mkv', '10-80,110-149', ''],
   ['subtitles.mkv', '10-80,110-149', ''],
+  ['broadcast_like.mkv', '0-470,1250-1823', ''],
   ['wrap.ts', '10-140', ''],
   ['jump_forward.ts', '100-200,250-299', ''],
   ['jump_backward.ts', '120-180', ''],
@@ -246,7 +258,8 @@ endforeach
 audio_test = executable('audio_test', 'audio_test.cpp',
   dependencies: media_dep,
 )
-foreach f : ['mpeg2_sd.ts', 'h264_hd.ts', 'hevc_latm.ts', 'h264_aac.mkv', 'jump_forward.ts', 'wrap.ts']
+foreach f : ['mpeg2_sd.ts', 'h264_hd.ts', 'hevc_latm.ts', 'h264_aac.mkv', 'jump_forward.ts', 'wrap.ts',
+             'broadcast_like.mkv']
   test('audio seek ' + f, audio_test,
     args: [fixture_targets[f]],
     depends: fixture_targets[f],
@@ -268,3 +281,24 @@ foreach backend : ['vulkan', 'vaapi']
     )
   endforeach
 endforeach
+
+analysis_test = executable('analysis_test', 'analysis_test.cpp',
+  dependencies: media_dep,
+)
+test('analysis broadcast_like.mkv', analysis_test,
+  args: [fixture_targets['broadcast_like.mkv']],
+  depends: fixture_targets['broadcast_like.mkv'],
+  timeout: 120,
+)
+
+if qt_test.found()
+  analysis_gui_test = executable('analysis_gui_test', 'analysis_gui_test.cpp',
+    dependencies: [ui_dep, qt_test],
+  )
+  test('analysis gui', analysis_gui_test,
+    args: [fixture_targets['broadcast_like.mkv']],
+    depends: fixture_targets['broadcast_like.mkv'],
+    env: gui_env,
+    timeout: 120,
+  )
+endif

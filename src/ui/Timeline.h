@@ -1,5 +1,6 @@
 #pragma once
 
+#include "analysis/AnalysisData.h"
 #include "media/PacketIndex.h"
 
 #include <QWidget>
@@ -22,6 +23,9 @@ public:
     void setSource(std::shared_ptr<const PacketIndex> index, int streamIndex);
     void clearSource();
     void setCutList(const CutList *cutList) { m_cutList = cutList; update(); }
+    // Analysis lanes (darkness, loudness) and the breaks found; nullptr hides them.
+    void setAnalysis(const AnalysisData *analysis, std::vector<BreakCandidate> candidates,
+                     std::vector<BreakRegion> breaks);
     void setPlayhead(uint32_t pos);
 
     void zoomIn();
@@ -29,8 +33,8 @@ public:
     void zoomFit();
     double framesPerPixel() const { return m_framesPerPixel; }
 
-    QSize sizeHint() const override { return {800, 76}; }
-    QSize minimumSizeHint() const override { return {200, 76}; }
+    QSize sizeHint() const override { return {800, totalHeight()}; }
+    QSize minimumSizeHint() const override { return {200, totalHeight()}; }
 
 signals:
     void seekRequested(int pos);
@@ -65,6 +69,11 @@ private:
     QRectF trackRect() const;
     QRectF overviewRect() const;
     QRectF rulerRect() const;
+    int laneCount() const;
+    QRectF laneRect(int lane) const;
+    int totalHeight() const;
+    void computeColumns(); // per-pixel aggregates of the lanes for the current view
+    void paintLanes(QPainter &p);
 
     void paintRuler(QPainter &p);
     void paintTrack(QPainter &p);
@@ -73,6 +82,13 @@ private:
     std::shared_ptr<const PacketIndex> m_index;
     const PacketIndex::Stream *m_stream = nullptr;
     const CutList *m_cutList = nullptr;
+    const AnalysisData *m_analysis = nullptr;
+    std::vector<BreakCandidate> m_candidates;
+    std::vector<BreakRegion> m_breaks;
+    std::vector<uint32_t> m_subtitleFrames; // frames where a subtitle starts
+    // Cached per-column lane values, valid for m_columnsKey.
+    std::vector<uint8_t> m_darkColumns, m_loudColumns;
+    std::tuple<double, double, int> m_columnsKey{-1, -1, -1};
     uint32_t m_playhead = 0;
     double m_viewStart = 0.0;
     double m_framesPerPixel = 1.0;

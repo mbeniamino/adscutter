@@ -6,6 +6,7 @@
 #include <QTime>
 #include <QWheelEvent>
 #include <cmath>
+#include <tuple>
 
 namespace adscutter {
 
@@ -14,8 +15,9 @@ namespace {
 constexpr int kRulerHeight = 20;
 constexpr int kTrackTop = 22;
 constexpr int kTrackHeight = 34;
-constexpr int kOverviewTop = 62;
 constexpr int kOverviewHeight = 10;
+constexpr int kLaneHeight = 9;
+constexpr int kLaneGap = 2;
 constexpr double kEdgeGrabPx = 5.0;
 
 const QColor kKept(76, 160, 92);
@@ -23,6 +25,7 @@ const QColor kRemoved(160, 64, 64, 70);
 const QColor kInMark(52, 120, 220);
 const QColor kOutMark(230, 140, 30);
 const QColor kPlayhead(230, 40, 40);
+const QColor kBreak(240, 150, 30);
 
 QString rulerLabel(int64_t us, double intervalS)
 {
@@ -41,7 +44,9 @@ Timeline::Timeline(QWidget *parent)
     setFocusPolicy(Qt::NoFocus);
     setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     setToolTip(tr("Click or drag to move · drag a segment edge to adjust it\n"
-                  "Wheel: zoom · Shift+wheel: scroll · bottom strip: whole recording"));
+                  "Wheel: zoom · Shift+wheel: scroll · bottom strip: whole recording\n"
+                  "After Analysis → Analyze Recording: orange = breaks found (marks = spot separators),\n"
+                  "lanes below: darkness, loudness (blue = silence), subtitles"));
 }
 
 void Timeline::setSource(std::shared_ptr<const PacketIndex> index, int streamIndex)
@@ -51,6 +56,20 @@ void Timeline::setSource(std::shared_ptr<const PacketIndex> index, int streamInd
     if (m_stream && m_stream->displayOrder.empty())
         m_stream = nullptr;
     m_playhead = 0;
+    m_subtitleFrames.clear();
+    if (m_stream) {
+        for (const PacketIndex::Stream &s : m_index->streams()) {
+            if (s.type != AVMEDIA_TYPE_SUBTITLE)
+                continue;
+            for (uint32_t pos = 0; pos < s.displayOrder.size(); ++pos)
+                m_subtitleFrames.push_back(m_index->positionAtTime(*m_stream, m_index->unifiedPts(s, s.displayOrder[pos])));
+        }
+        std::sort(m_subtitleFrames.begin(), m_subtitleFrames.end());
+    }
+    m_analysis = nullptr;
+    m_candidates.clear();
+    m_breaks.clear();
+    updateGeometry();
     zoomFit();
 }
 
@@ -137,9 +156,36 @@ QRectF Timeline::trackRect() const
     return QRectF(0, kTrackTop, width(), kTrackHeight);
 }
 
+int Timeline::laneCount() const
+{
+    return (m_analysis ? 2 : 0) + (m_subtitleFrames.empty() ? 0 : 1);
+}
+
+QRectF Timeline::laneRect(int lane) const
+{
+    return QRectF(0, kTrackTop + kTrackHeight + kLaneGap + lane * (kLaneHeight + kLaneGap), width(), kLaneHeight);
+}
+
 QRectF Timeline::overviewRect() const
 {
-    return QRectF(0, kOverviewTop, width(), kOverviewHeight);
+    const int top = kTrackTop + kTrackHeight + kLaneGap + laneCount() * (kLaneHeight + kLaneGap) + 4;
+    return QRectF(0, top, width(), kOverviewHeight);
+}
+
+int Timeline::totalHeight() const
+{
+    return int(overviewRect().bottom()) + 4;
+}
+
+void Timeline::setAnalysis(const AnalysisData *analysis, std::vector<BreakCandidate> candidates,
+                           std::vector<BreakRegion> breaks)
+{
+    m_analysis = analysis;
+    m_candidates = std::move(candidates);
+    m_breaks = std::move(breaks);
+    m_columnsKey = {-1, -1, -1};
+    updateGeometry();
+    update();
 }
 
 void Timeline::resizeEvent(QResizeEvent *)
@@ -163,6 +209,7 @@ void Timeline::paintEvent(QPaintEvent *)
     }
     paintRuler(p);
     paintTrack(p);
+    paintLanes(p);
     paintOverview(p);
 }
 
@@ -228,6 +275,25 @@ void Timeline::paintTrack(QPainter &p)
             const QRectF r(QPointF(std::max(-1.0, x0), track.top()), QPointF(std::min(width() + 1.0, x1), track.bottom()));
             p.fillRect(r, kKept);
         }
+    }
+
+    // Breaks found by the analysis, and their candidates (spot separators).
+    for (const BreakRegion &br : m_breaks) {
+        const double x0 = xOf(br.first), x1 = xOf(double(br.last) + 1);
+        if (x1 < 0 || x0 > width())
+            continue;
+        QColor c = kBreak;
+        c.setAlpha(80);
+        p.fillRect(QRectF(QPointF(x0, track.top()), QPointF(std::max(x1, x0 + 2), track.top() + 6)), kBreak);
+        p.fillRect(QRectF(QPointF(x0, track.top()), QPointF(std::max(x1, x0 + 2), track.bottom())), c);
+    }
+    for (const BreakCandidate &c : m_candidates) {
+        if (!c.silent)
+            continue;
+        const double x = xOf(c.first);
+        if (x < -2 || x > width() + 2)
+            continue;
+        p.fillRect(QRectF(x, track.top(), std::max(1.5, xOf(double(c.last) + 1) - x), 6), kBreak.darker(160));
     }
 
     // Cut points, when they are far enough apart to be told apart.
@@ -303,6 +369,84 @@ void Timeline::paintTrack(QPainter &p)
     p.drawRect(track.adjusted(0, 0, -1, 0));
 }
 
+void Timeline::computeColumns()
+{
+    const auto key = std::make_tuple(m_viewStart, m_framesPerPixel, width());
+    if (key == m_columnsKey)
+        return;
+    m_columnsKey = key;
+    const int w = std::max(1, width());
+    m_darkColumns.assign(size_t(w), 0);
+    m_loudColumns.assign(size_t(w), AnalysisData::kNoAudio);
+    if (!m_analysis || m_analysis->frames.size() != frameCount())
+        return;
+    for (int x = 0; x < w; ++x) {
+        const auto from = uint32_t(std::clamp(std::floor(posAt(x)), 0.0, double(frameCount())));
+        const auto to = uint32_t(std::clamp(std::ceil(posAt(x + 1)), double(from + 1), double(frameCount())));
+        if (from >= frameCount())
+            break;
+        uint8_t dark = 0;
+        for (uint32_t f = from; f < to; ++f)
+            dark = std::max(dark, m_analysis->frames[f].dark);
+        m_darkColumns[size_t(x)] = dark;
+        // Audio: the quietest window in the column (silence must stand out).
+        const int64_t t0 = m_index->frameTime(*m_stream, from);
+        const int64_t t1 = to < frameCount() ? m_index->frameTime(*m_stream, to) : t0 + AnalysisData::kAudioWindowUs;
+        uint8_t quietest = 0;
+        bool any = false;
+        for (int64_t t = t0; t < std::max(t1, t0 + 1); t += AnalysisData::kAudioWindowUs) {
+            const uint8_t l = m_analysis->loudnessAt(t);
+            if (l != AnalysisData::kNoAudio) {
+                quietest = std::max(quietest, l);
+                any = true;
+            }
+        }
+        m_loudColumns[size_t(x)] = any ? quietest : AnalysisData::kNoAudio;
+    }
+}
+
+void Timeline::paintLanes(QPainter &p)
+{
+    int lane = 0;
+    if (m_analysis) {
+        computeColumns();
+        // Darkness: the darker the frames under a pixel, the darker the line.
+        const QRectF dark = laneRect(lane++);
+        p.fillRect(dark, palette().base());
+        for (int x = 0; x < int(m_darkColumns.size()); ++x) {
+            if (m_darkColumns[size_t(x)] < 64)
+                continue;
+            QColor c(20, 20, 20);
+            c.setAlpha(m_darkColumns[size_t(x)]);
+            p.fillRect(QRectF(x, dark.top(), 1, dark.height()), c);
+        }
+        // Loudness: a level bar; silence in blue.
+        const QRectF loud = laneRect(lane++);
+        p.fillRect(loud, palette().base());
+        QColor level = palette().color(QPalette::WindowText);
+        level.setAlpha(110);
+        for (int x = 0; x < int(m_loudColumns.size()); ++x) {
+            const uint8_t db = m_loudColumns[size_t(x)];
+            if (db == AnalysisData::kNoAudio)
+                continue;
+            if (db >= 55) {
+                p.fillRect(QRectF(x, loud.top(), 1, loud.height()), QColor(60, 120, 230));
+            } else {
+                const double h = loud.height() * std::clamp((60.0 - db) / 50.0, 0.1, 1.0);
+                p.fillRect(QRectF(x, loud.bottom() - h, 1, h), level);
+            }
+        }
+    }
+    if (!m_subtitleFrames.empty()) {
+        const QRectF subs = laneRect(lane++);
+        p.fillRect(subs, palette().base());
+        QColor c(140, 90, 200);
+        auto it = std::lower_bound(m_subtitleFrames.begin(), m_subtitleFrames.end(), frameAt(0));
+        for (; it != m_subtitleFrames.end() && *it <= frameAt(width()) + 1; ++it)
+            p.fillRect(QRectF(std::round(xOf(*it)), subs.top(), 1.5, subs.height()), c);
+    }
+}
+
 void Timeline::paintOverview(QPainter &p)
 {
     const QRectF r = overviewRect();
@@ -350,7 +494,7 @@ void Timeline::mousePressEvent(QMouseEvent *event)
     if (!m_stream || event->button() != Qt::LeftButton)
         return;
     const QPointF pt = event->position();
-    if (pt.y() >= kOverviewTop - 2) {
+    if (pt.y() >= overviewRect().top() - 2) {
         m_drag = Drag::Overview;
         const double pos = pt.x() / width() * frameCount();
         setView(pos - 0.5 * width() * m_framesPerPixel, m_framesPerPixel);

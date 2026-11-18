@@ -97,6 +97,21 @@ MainWindow::MainWindow(QWidget *parent)
         stopIndexing();
         statusBar()->showMessage(tr("Indexing canceled"), 5000);
     });
+    m_analysisProgress = new QProgressBar(this);
+    m_analysisProgress->setRange(0, 1000);
+    m_analysisProgress->setMaximumWidth(200);
+    m_analysisProgress->setFormat(tr("Analyzing %p%"));
+    m_analysisProgress->setVisible(false);
+    m_analysisCancel = new QToolButton(this);
+    m_analysisCancel->setText(tr("Cancel"));
+    m_analysisCancel->setToolTip(tr("Stop the analysis"));
+    m_analysisCancel->setVisible(false);
+    connect(m_analysisCancel, &QToolButton::clicked, this, [this] {
+        stopAnalysis();
+        statusBar()->showMessage(tr("Analysis canceled"), 5000);
+    });
+    statusBar()->addPermanentWidget(m_analysisProgress);
+    statusBar()->addPermanentWidget(m_analysisCancel);
     statusBar()->addPermanentWidget(m_indexProgress);
     statusBar()->addPermanentWidget(m_indexCancel);
     statusBar()->addPermanentWidget(m_statusInfo);
@@ -146,6 +161,7 @@ MainWindow::MainWindow(QWidget *parent)
 MainWindow::~MainWindow()
 {
     // Stop the worker threads before the widgets they report to go away.
+    stopAnalysis();
     stopExport();
     stopFrameServer();
     stopIndexing();
@@ -321,6 +337,26 @@ void MainWindow::createMenus()
         goMenu->addAction(m_navigationActions[i]);
         if (i == 0 || i == 3 || i == 7 || i == 10 || i == 11)
             goMenu->addSeparator();
+    }
+
+    QMenu *analysisMenu = menuBar()->addMenu(tr("&Analysis"));
+    QAction *analyze = analysisMenu->addAction(tr("&Analyze Recording"), QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_A),
+                                               this, [this] { startAnalysis(); });
+    analyze->setToolTip(tr("Find fades to black, silences and ad breaks (takes a few minutes for a film)"));
+    analysisMenu->addSeparator();
+    QAction *nextBreak = analysisMenu->addAction(tr("&Next Break Boundary"), QKeySequence(Qt::SHIFT | Qt::Key_Up),
+                                                 this, [this] { jumpToBreak(true, false); });
+    QAction *previousBreak = analysisMenu->addAction(tr("&Previous Break Boundary"), QKeySequence(Qt::SHIFT | Qt::Key_Down),
+                                                     this, [this] { jumpToBreak(false, false); });
+    QAction *nextSeparator = analysisMenu->addAction(tr("Next &Separator"), QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_Up),
+                                                     this, [this] { jumpToBreak(true, true); });
+    QAction *previousSeparator = analysisMenu->addAction(tr("Previous S&eparator"),
+                                                         QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_Down),
+                                                         this, [this] { jumpToBreak(false, true); });
+    for (QAction *a : {analyze, nextBreak, previousBreak, nextSeparator, previousSeparator}) {
+        a->setEnabled(false);
+        m_editActions << a;
+        addAction(a);
     }
 
     QMenu *viewMenu = menuBar()->addMenu(tr("&View"));
@@ -511,6 +547,8 @@ bool MainWindow::closeFile()
                != QMessageBox::Yes)
         return false;
     stopExport();
+    stopAnalysis();
+    setAnalysis(nullptr);
     stopFrameServer();
     stopIndexing();
     m_index.reset();
@@ -673,6 +711,8 @@ void MainWindow::rebuildIndex()
         QMessageBox::warning(this, tr("Cannot reopen file"), error);
         return;
     }
+    stopAnalysis();
+    setAnalysis(nullptr);
     stopFrameServer();
     m_index.reset();
     m_timeline->clearSource();
@@ -713,6 +753,11 @@ void MainWindow::startFrameServer()
     m_playback->setSource(m_file->path(), m_index, video->index);
     if (QFileInfo::exists(m_cutListPath))
         loadCutList(m_cutListPath, true);
+    // A previous analysis of this recording is shown right away.
+    QString ignored;
+    if (auto cached = AnalysisData::load(AnalysisData::cachePath(m_file->path()), FileKey::of(m_file->path()), &ignored);
+        cached && cached->videoStream == video->index && cached->frames.size() == video->displayOrder.size())
+        setAnalysis(std::move(cached));
 
     for (QAction *a : std::as_const(m_navigationActions))
         a->setEnabled(true);
@@ -1188,6 +1233,122 @@ void MainWindow::exportFinished(const QString &outputPath)
         statusBar()->showMessage(tr("Exported to %1").arg(outputPath), 8000);
     }
     box->open();
+}
+
+// --- Analysis -------------------------------------------------------------------
+
+bool MainWindow::startAnalysis()
+{
+    const PacketIndex::Stream *video = videoIndex();
+    if (!video || m_analysisJob)
+        return false;
+    m_analysisJob = std::make_unique<AnalysisJob>();
+    connect(m_analysisJob.get(), &AnalysisJob::progress, m_analysisProgress,
+            [this](double fraction) { m_analysisProgress->setValue(int(fraction * 1000)); });
+    connect(m_analysisJob.get(), &AnalysisJob::finished, this, &MainWindow::analysisFinished);
+    m_analysisProgress->setValue(0);
+    m_analysisProgress->setVisible(true);
+    m_analysisCancel->setVisible(true);
+    m_analysisJob->start(m_file->path(), m_index, video->index, playbackAudioStream());
+    return true;
+}
+
+void MainWindow::stopAnalysis()
+{
+    m_analysisJob.reset(); // cancels and waits
+    if (m_analysisProgress) {
+        m_analysisProgress->setVisible(false);
+        m_analysisCancel->setVisible(false);
+    }
+}
+
+void MainWindow::analysisFinished()
+{
+    if (!m_analysisJob)
+        return;
+    auto result = m_analysisJob->takeResult();
+    const QString error = m_analysisJob->error();
+    const bool canceled = m_analysisJob->canceled();
+    // The job emitted from its thread, which is finishing: release it later.
+    m_analysisJob.release()->deleteLater();
+    m_analysisProgress->setVisible(false);
+    m_analysisCancel->setVisible(false);
+    if (!result) {
+        if (!canceled)
+            QMessageBox::warning(this, tr("Analysis failed"), error);
+        return;
+    }
+    setAnalysis(std::move(result));
+    statusBar()->showMessage(tr("Analysis complete: %n break(s) found (Shift+Up/Down to go through them)", nullptr,
+                                int(m_breaks.size())),
+                             8000);
+}
+
+void MainWindow::setAnalysis(std::unique_ptr<AnalysisData> analysis)
+{
+    m_analysis = std::move(analysis);
+    m_candidates.clear();
+    m_breaks.clear();
+    if (m_analysis && m_index) {
+        m_candidates = findBreakCandidates(*m_analysis, *m_index);
+        m_breaks = findBreaks(m_candidates, *m_index, m_analysis->videoStream);
+    }
+    m_timeline->setAnalysis(m_analysis.get(), m_candidates, m_breaks);
+}
+
+void MainWindow::jumpToBreak(bool forward, bool separators)
+{
+    if (!m_analysis) {
+        statusBar()->showMessage(tr("Analyze the recording first (Analysis → Analyze Recording)"), 5000);
+        return;
+    }
+    // Targets: the frames where you would cut. For breaks, the last frame
+    // before one and the first frame after it; for separators, the first
+    // dark frame of each.
+    std::vector<uint32_t> targets;
+    if (separators) {
+        for (const BreakCandidate &c : m_candidates)
+            if (c.silent)
+                targets.push_back(c.first);
+    } else {
+        for (const BreakRegion &b : m_breaks) {
+            targets.push_back(b.first > 0 ? b.first - 1 : 0);
+            targets.push_back(b.last + 1);
+        }
+    }
+    std::sort(targets.begin(), targets.end());
+    uint32_t target = m_position;
+    if (forward) {
+        auto it = std::upper_bound(targets.begin(), targets.end(), m_position);
+        if (it == targets.end()) {
+            statusBar()->showMessage(separators ? tr("No more separators") : tr("No more breaks"), 3000);
+            return;
+        }
+        target = *it;
+    } else {
+        auto it = std::lower_bound(targets.begin(), targets.end(), m_position);
+        if (it == targets.begin()) {
+            statusBar()->showMessage(separators ? tr("No earlier separators") : tr("No earlier breaks"), 3000);
+            return;
+        }
+        target = *(it - 1);
+    }
+    goTo(target);
+    if (!separators) {
+        for (size_t i = 0; i < m_breaks.size(); ++i) {
+            const BreakRegion &b = m_breaks[i];
+            const PacketIndex::Stream *video = videoIndex();
+            const QString span = QStringLiteral("%1 – %2")
+                                     .arg(formatTime(m_index->frameTime(*video, b.first)),
+                                          formatTime(m_index->frameTime(*video, b.last)));
+            if (target + 1 == b.first)
+                statusBar()->showMessage(tr("Last frame before break %1 of %2 (%3): mark the end of a part with O")
+                                             .arg(i + 1).arg(m_breaks.size()).arg(span), 8000);
+            else if (target == b.last + 1)
+                statusBar()->showMessage(tr("First frame after break %1 of %2 (%3): mark the start of a part with I")
+                                             .arg(i + 1).arg(m_breaks.size()).arg(span), 8000);
+        }
+    }
 }
 
 void MainWindow::showAbout()
