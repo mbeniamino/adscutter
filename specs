@@ -1,0 +1,22 @@
+This is a very basic video editing application. The application will be used to
+cut ads from a video recorded from tv. The app won't reencode the streams, it
+will just allow to cut part of the streams and for this reason every remaining
+clip will begin from a full frame. Clips can end wherever they want. The
+application will be a graphical application that will allow to navigate the
+video, both from full frame to full frame and from intermediate frame to
+intermediate frame and select which video and audio streams to export.
+
+mkv will be the ending container, while input file could be at least in .ts and
+.mkv format. Input should support all codecs used in DVB-T and DVB-T2
+standards. Support for other containers and codecs would be nice to have, but
+not necessary.
+
+The application should work well in Linux and Wayland.
+
+Future improvements:
+- a tool to help finding ads;
+- a feature to automatically detect and remove ads.
+
+The application should aim to use as few dependencies as possible, but it's ok
+to use a media handling library (like ffmpeg for example). The choice of the
+language is not relevant.

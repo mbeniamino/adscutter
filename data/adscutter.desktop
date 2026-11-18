@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=AdsCutter
+Comment=Cut ads out of TV recordings without re-encoding
+Exec=adscutter %f
+Icon=video-x-generic
+Terminal=false
+Categories=AudioVideo;Video;AudioVideoEditing;Qt;
+MimeType=video/mp2t;video/x-matroska;
