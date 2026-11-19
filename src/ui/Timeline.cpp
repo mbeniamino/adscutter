@@ -158,7 +158,14 @@ QRectF Timeline::trackRect() const
 
 int Timeline::laneCount() const
 {
-    return (m_analysis ? 2 : 0) + (m_subtitleFrames.empty() ? 0 : 1);
+    return (m_analysis ? 2 : 0) + int(m_regionLanes.size()) + (m_subtitleFrames.empty() ? 0 : 1);
+}
+
+void Timeline::setRegionLanes(std::vector<RegionLane> lanes)
+{
+    m_regionLanes = std::move(lanes);
+    updateGeometry();
+    update();
 }
 
 QRectF Timeline::laneRect(int lane) const
@@ -435,6 +442,30 @@ void Timeline::paintLanes(QPainter &p)
                 const double h = loud.height() * std::clamp((60.0 - db) / 50.0, 0.1, 1.0);
                 p.fillRect(QRectF(x, loud.bottom() - h, 1, h), level);
             }
+        }
+    }
+    for (const RegionLane &region : m_regionLanes) {
+        const QRectF r = laneRect(lane++);
+        p.fillRect(r, palette().base());
+        for (const auto &[first, last] : region.shown) {
+            const double x0 = xOf(first), x1 = xOf(double(last) + 1);
+            if (x1 < 0 || x0 > width())
+                continue;
+            p.fillRect(QRectF(QPointF(std::max(-1.0, x0), r.top()), QPointF(std::min(width() + 1.0, std::max(x1, x0 + 1)), r.bottom())),
+                       region.color);
+        }
+        QColor tick = palette().color(QPalette::WindowText);
+        for (uint32_t c : region.changes) {
+            const double x = xOf(c);
+            if (x >= -1 && x <= width() + 1)
+                p.fillRect(QRectF(std::round(x) - 0.5, r.top(), 1.5, r.height()), tick);
+        }
+        if (r.height() >= 8) {
+            QFont f = p.font();
+            f.setPointSizeF(std::max(6.0, f.pointSizeF() * 0.7));
+            p.setFont(f);
+            p.setPen(palette().color(QPalette::WindowText));
+            p.drawText(r.adjusted(3, -1, 0, 1), Qt::AlignLeft | Qt::AlignVCenter, region.name);
         }
     }
     if (!m_subtitleFrames.empty()) {

@@ -23,6 +23,7 @@ struct ExportReport {
         // Reference frames shown after `out` that later frames of the segment
         // depend on, so they cannot be dropped without re-encoding.
         uint32_t extraFrames = 0;
+        std::vector<uint32_t> extraPositions; // their display positions (not always out+1, out+2...)
         int64_t sourceStartUs = 0; // unified time of `in`
         int64_t durationUs = 0;    // including the extra frames
     };

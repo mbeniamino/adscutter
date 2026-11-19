@@ -302,3 +302,12 @@ if qt_test.found()
     timeout: 120,
   )
 endif
+
+region_test = executable('region_test', 'region_test.cpp',
+  dependencies: media_dep,
+)
+test('regions broadcast_like.mkv', region_test,
+  args: [fixture_targets['broadcast_like.mkv']],
+  depends: fixture_targets['broadcast_like.mkv'],
+  timeout: 120,
+)

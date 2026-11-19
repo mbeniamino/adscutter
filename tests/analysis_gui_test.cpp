@@ -5,8 +5,16 @@
 // Run with QT_QPA_PLATFORM=offscreen.
 
 #include "ui/MainWindow.h"
+#include "ui/VideoView.h"
 
 #include <QApplication>
+#include <QComboBox>
+#include <QDialog>
+#include <QLineEdit>
+#include <QPushButton>
+#include <QSettings>
+#include <QSpinBox>
+#include <QTimer>
 #include <QFile>
 #include <QLabel>
 #include <QRegularExpression>
@@ -102,6 +110,86 @@ int main(int argc, char **argv)
     expectFrame(info, 901, "Ctrl+Shift+Up: first separator");
     QTest::keyClick(&window, Qt::Key_Up, Qt::ShiftModifier | Qt::ControlModifier);
     expectFrame(info, 1213, "Ctrl+Shift+Up: next separator");
+
+    // --- Method 2: a region drawn on the picture -----------------------------
+    // Into the break (cut point 672), where "MEDIASET" is shown.
+    QTest::keyClick(&window, Qt::Key_Home);
+    for (int i = 0; i < 7; ++i)
+        QTest::keyClick(&window, Qt::Key_Up);
+    expectFrame(info, 673, "into the break");
+
+    auto *view = window.findChild<VideoView *>();
+    QPushButton *draw = nullptr;
+    for (QPushButton *b : window.findChildren<QPushButton *>())
+        if (b->text() == QStringLiteral("Draw…"))
+            draw = b;
+    if (!view || !draw) {
+        std::fprintf(stderr, "FAIL: video view or Draw button not found\n");
+        return 1;
+    }
+    draw->click();
+    if (!view->isDrawing())
+        ++failures, std::fprintf(stderr, "FAIL: not in drawing mode\n");
+
+    // The dialog that follows the drawing: name it, "shown during ads".
+    QTimer::singleShot(500, [] {
+        auto *dialog = qobject_cast<QDialog *>(QApplication::activeModalWidget());
+        if (!dialog)
+            return;
+        dialog->findChild<QLineEdit *>(QStringLiteral("regionName"))->setText(QStringLiteral("MEDIASET"));
+        dialog->findChild<QComboBox *>(QStringLiteral("regionKind"))->setCurrentIndex(1);
+        dialog->accept();
+    });
+    // Picture rectangle 1045,612 200x44 (1280x720, 16:9) to widget coordinates.
+    const double aspect = 16.0 / 9.0, widgetAspect = double(view->width()) / view->height();
+    QRectF target;
+    if (widgetAspect > aspect)
+        target = QRectF((view->width() - view->height() * aspect) / 2, 0, view->height() * aspect, view->height());
+    else
+        target = QRectF(0, (view->height() - view->width() / aspect) / 2, view->width(), view->width() / aspect);
+    auto toWidget = [&](double x, double y) {
+        return QPoint(int(target.left() + x * target.width() / 1280), int(target.top() + y * target.height() / 720));
+    };
+    QTest::mousePress(view, Qt::LeftButton, {}, toWidget(1045, 612));
+    QTest::mouseMove(view, toWidget(1150, 640));
+    QTest::mouseMove(view, toWidget(1245, 656));
+    QTest::mouseRelease(view, Qt::LeftButton, {}, toWidget(1245, 656));
+    const bool added = QTest::qWaitFor([&] { return window.regions().size() == 1; }, 5000);
+    std::printf("%-34s -> %s\n", "region drawn", added ? qPrintable(window.regions()[0].name) : "NONE");
+    if (!added)
+        return 1;
+    if (window.regions()[0].kind != WatchRegion::Kind::VisibleInAds)
+        ++failures, std::fprintf(stderr, "FAIL: region kind\n");
+
+    window.findChild<QSpinBox *>()->setValue(5); // the test break lasts 14 s
+    if (!window.startRegionScan())
+        ++failures, std::fprintf(stderr, "FAIL: region scan did not start\n");
+    (void)QTest::qWaitFor([&] { return !window.isScanningRegions(); }, 60000);
+    const auto &results = window.regionResults();
+    const bool exact = results.size() == 1 && results[0].changes.size() == 2
+                       && std::abs(int(results[0].changes[0]) - 500) <= 1
+                       && std::abs(int(results[0].changes[1]) - 1224) <= 1;
+    std::printf("%-34s -> %s\n", "changes found", exact ? "500 and 1224" : "WRONG");
+    if (!exact)
+        ++failures;
+    window.activateWindow();
+    (void)QTest::qWaitForWindowActive(&window);
+
+    // Cues from both methods, in order: the fade (last frame before it),
+    // the region turning to "MEDIASET" (programme ends at 499), then both
+    // resume at 1224.
+    QTest::keyClick(&window, Qt::Key_Home);
+    QTest::keyClick(&window, Qt::Key_Up, Qt::ShiftModifier);
+    expectFrame(info, beforeBreak, "Shift+Up: fade cue (O)");
+    QTest::keyClick(&window, Qt::Key_Up, Qt::ShiftModifier);
+    expectFrame(info, 500, "Shift+Up: region cue (O)");
+    QTest::keyClick(&window, Qt::Key_Up, Qt::ShiftModifier);
+    expectFrame(info, 1225, "Shift+Up: programme resumes (I)");
+
+    const bool saved = !QSettings().value(QStringLiteral("regions")).toByteArray().isEmpty();
+    std::printf("%-34s -> %s\n", "regions kept in the settings", saved ? "yes" : "NO");
+    if (!saved)
+        ++failures;
 
     if (argc >= 3) {
         QTest::qWait(300);

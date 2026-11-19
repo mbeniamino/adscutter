@@ -271,8 +271,11 @@ int main(int argc, char **argv)
     // --- Video pictures ----------------------------------------------------------
     std::vector<uint32_t> expected; // source display positions, in output order
     for (const auto &s : report.segments) {
-        for (uint32_t pos = s.frames.in; pos <= s.frames.out + s.extraFrames; ++pos)
+        for (uint32_t pos = s.frames.in; pos <= s.frames.out; ++pos)
             expected.push_back(pos);
+        // Reference frames shown after the out frame: not necessarily the
+        // next ones (a B frame decoded later is left out).
+        expected.insert(expected.end(), s.extraPositions.begin(), s.extraPositions.end());
     }
     const test::DecodedVideo source = test::decodeAll(path, videoIndex);
     av_log_set_callback(logCallback);
@@ -297,7 +300,7 @@ int main(int argc, char **argv)
     std::vector<SegTiming> timing;
     size_t frame = 0;
     for (const auto &s : report.segments) {
-        const size_t count = s.frames.out + s.extraFrames - s.frames.in + 1;
+        const size_t count = s.frames.out - s.frames.in + 1 + s.extraPositions.size();
         if (frame + count > outUs.size())
             break;
         SegTiming t{};
@@ -305,7 +308,7 @@ int main(int argc, char **argv)
         t.startUs = outUs[frame];
         t.endUs = outUs[frame + count - 1] + frameUs;
         for (size_t k = 0; k < count; ++k) {
-            const int64_t offset = outUs[frame + k] - index->frameTime(video, s.frames.in + uint32_t(k));
+            const int64_t offset = outUs[frame + k] - index->frameTime(video, expected[frame + k]);
             if (std::llabs(offset - t.offsetUs) > 1000)
                 fail("segment at %u: frame %zu shifted by %lld us", s.frames.in, k,
                      static_cast<long long>(offset - t.offsetUs));

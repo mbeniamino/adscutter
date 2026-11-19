@@ -1,6 +1,8 @@
 #include "ui/MainWindow.h"
+#include "media/RandomAccessDecoder.h"
 #include "ui/NavigationBar.h"
 #include "ui/Playback.h"
+#include "ui/RegionPanel.h"
 #include "ui/SegmentPanel.h"
 #include "ui/StreamPanel.h"
 #include "ui/Timeline.h"
@@ -9,6 +11,11 @@
 #include <QApplication>
 #include <QActionGroup>
 #include <QCloseEvent>
+#include <QComboBox>
+#include <QFormLayout>
+#include <QInputDialog>
+#include <QJsonDocument>
+#include <QLineEdit>
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QDragEnterEvent>
@@ -86,6 +93,15 @@ MainWindow::MainWindow(QWidget *parent)
     addDockWidget(Qt::BottomDockWidgetArea, segmentsDock);
     splitDockWidget(streamsDock, segmentsDock, Qt::Horizontal);
 
+    m_regionPanel = new RegionPanel(this);
+    m_regionsDock = new QDockWidget(tr("Regions"), this);
+    m_regionsDock->setObjectName(QStringLiteral("regionsDock"));
+    m_regionsDock->setWidget(m_regionPanel);
+    m_regionsDock->setFeatures(QDockWidget::DockWidgetMovable | QDockWidget::DockWidgetFloatable);
+    tabifyDockWidget(streamsDock, m_regionsDock);
+    streamsDock->raise();
+    connect(m_regionsDock, &QDockWidget::visibilityChanged, this, [this] { updateRegionViews(); });
+
     m_indexProgress->setRange(0, 1000);
     m_indexProgress->setMaximumWidth(200);
     m_indexProgress->setFormat(tr("Indexing %p%"));
@@ -108,6 +124,7 @@ MainWindow::MainWindow(QWidget *parent)
     m_analysisCancel->setVisible(false);
     connect(m_analysisCancel, &QToolButton::clicked, this, [this] {
         stopAnalysis();
+        stopRegionScan();
         statusBar()->showMessage(tr("Analysis canceled"), 5000);
     });
     statusBar()->addPermanentWidget(m_analysisProgress);
@@ -124,6 +141,31 @@ MainWindow::MainWindow(QWidget *parent)
     m_recentFiles = settings.value(QStringLiteral("recentFiles")).toStringList();
     m_lastDir = settings.value(QStringLiteral("lastDirectory"), m_lastDir).toString();
     setAcceptDrops(true);
+    m_regions = regionsFromJson(QJsonDocument::fromJson(settings.value(QStringLiteral("regions")).toByteArray()).array());
+    m_regionPanel->setMinChangeSeconds(settings.value(QStringLiteral("regionMinChangeSeconds"), 30).toInt());
+    m_regionPanel->setRegions(m_regions);
+    m_regionPanel->setPresetNames(regionPresetNames());
+    connect(m_regionPanel, &RegionPanel::drawRequested, this, &MainWindow::drawRegion);
+    connect(m_regionPanel, &RegionPanel::findRequested, this, [this] { startRegionScan(); });
+    connect(m_regionPanel, &RegionPanel::removeRequested, this, [this](int index) {
+        if (index >= 0 && size_t(index) < m_regions.size()) {
+            m_regions.erase(m_regions.begin() + index);
+            regionsChanged(false);
+        }
+    });
+    connect(m_regionPanel, &RegionPanel::kindToggled, this, [this](int index) {
+        if (index < 0 || size_t(index) >= m_regions.size())
+            return;
+        WatchRegion &r = m_regions[size_t(index)];
+        r.kind = r.kind == WatchRegion::Kind::VisibleInAds ? WatchRegion::Kind::VisibleInProgramme
+                                                           : WatchRegion::Kind::VisibleInAds;
+        regionsChanged(true); // where it changes stays the same; what it means flips
+    });
+    connect(m_regionPanel, &RegionPanel::presetSaveRequested, this, &MainWindow::saveRegionPreset);
+    connect(m_regionPanel, &RegionPanel::presetLoadRequested, this, &MainWindow::loadRegionPreset);
+    connect(m_regionPanel, &RegionPanel::presetDeleteRequested, this, &MainWindow::deleteRegionPreset);
+    connect(m_regionPanel, &RegionPanel::minChangeChanged, this,
+            [](int seconds) { QSettings().setValue(QStringLiteral("regionMinChangeSeconds"), seconds); });
 
     m_playback = new PlaybackController(this);
     connect(m_playback, &PlaybackController::positionChanged, this, [this](quint32 pos) { showPosition(pos); });
@@ -137,6 +179,9 @@ MainWindow::MainWindow(QWidget *parent)
     });
 
     connect(m_timeline, &Timeline::seekRequested, this, [this](int pos) { goTo(pos); });
+    connect(m_videoView, &VideoView::rectangleDrawn, this, &MainWindow::regionDrawn);
+    connect(m_videoView, &VideoView::drawingCanceled, this,
+            [this] { statusBar()->showMessage(tr("Drawing canceled"), 3000); });
     connect(m_timeline, &Timeline::edgeDragStarted, this, [this](int, bool) { m_cutList.checkpoint(); });
     connect(m_timeline, &Timeline::edgeDragged, this, [this](int segment, bool isIn, int pos) {
         const uint32_t applied = isIn ? m_cutList.moveIn(size_t(segment), uint32_t(pos))
@@ -160,7 +205,12 @@ MainWindow::MainWindow(QWidget *parent)
 
 MainWindow::~MainWindow()
 {
+    // Qt hides the docks after this object's members are gone: their
+    // signals must not reach it any more.
+    m_regionsDock->disconnect(this);
+    m_regionPanel->disconnect(this);
     // Stop the worker threads before the widgets they report to go away.
+    stopRegionScan();
     stopAnalysis();
     stopExport();
     stopFrameServer();
@@ -228,6 +278,11 @@ void MainWindow::createActions()
     QAction *out = editAction(tr("Mark &Out (end of a part to keep)"), Qt::Key_O, &MainWindow::markOut);
     editAction(tr("&Delete Segment at Playhead"), Qt::Key_Delete, &MainWindow::deleteSegment);
     editAction(tr("&Clear Marks"), Qt::Key_Escape, [this] {
+        if (m_videoView->isDrawing()) { // Esc first cancels drawing a region
+            m_videoView->setDrawing(false);
+            statusBar()->showMessage(tr("Drawing canceled"), 3000);
+            return;
+        }
         m_cutList.clearMarks();
         cutListChanged();
     });
@@ -340,20 +395,25 @@ void MainWindow::createMenus()
     }
 
     QMenu *analysisMenu = menuBar()->addMenu(tr("&Analysis"));
-    QAction *analyze = analysisMenu->addAction(tr("&Analyze Recording"), QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_A),
+    QAction *analyze = analysisMenu->addAction(tr("Find Breaks by &Fades"), QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_A),
                                                this, [this] { startAnalysis(); });
     analyze->setToolTip(tr("Find fades to black, silences and ad breaks (takes a few minutes for a film)"));
+    QAction *findRegions = analysisMenu->addAction(tr("Find Changes in &Regions"),
+                                                   QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_R), this,
+                                                   [this] { startRegionScan(); });
+    findRegions->setToolTip(tr("Find where the watched regions (Regions panel) change"));
+    QAction *draw = analysisMenu->addAction(tr("&Draw Region…"), this, &MainWindow::drawRegion);
     analysisMenu->addSeparator();
-    QAction *nextBreak = analysisMenu->addAction(tr("&Next Break Boundary"), QKeySequence(Qt::SHIFT | Qt::Key_Up),
+    QAction *nextBreak = analysisMenu->addAction(tr("&Next Cue"), QKeySequence(Qt::SHIFT | Qt::Key_Up),
                                                  this, [this] { jumpToBreak(true, false); });
-    QAction *previousBreak = analysisMenu->addAction(tr("&Previous Break Boundary"), QKeySequence(Qt::SHIFT | Qt::Key_Down),
+    QAction *previousBreak = analysisMenu->addAction(tr("&Previous Cue"), QKeySequence(Qt::SHIFT | Qt::Key_Down),
                                                      this, [this] { jumpToBreak(false, false); });
     QAction *nextSeparator = analysisMenu->addAction(tr("Next &Separator"), QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_Up),
                                                      this, [this] { jumpToBreak(true, true); });
     QAction *previousSeparator = analysisMenu->addAction(tr("Previous S&eparator"),
                                                          QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_Down),
                                                          this, [this] { jumpToBreak(false, true); });
-    for (QAction *a : {analyze, nextBreak, previousBreak, nextSeparator, previousSeparator}) {
+    for (QAction *a : {analyze, findRegions, draw, nextBreak, previousBreak, nextSeparator, previousSeparator}) {
         a->setEnabled(false);
         m_editActions << a;
         addAction(a);
@@ -549,6 +609,9 @@ bool MainWindow::closeFile()
     stopExport();
     stopAnalysis();
     setAnalysis(nullptr);
+    stopRegionScan();
+    m_regionResults.clear();
+    updateRegionViews();
     stopFrameServer();
     stopIndexing();
     m_index.reset();
@@ -713,6 +776,9 @@ void MainWindow::rebuildIndex()
     }
     stopAnalysis();
     setAnalysis(nullptr);
+    stopRegionScan();
+    m_regionResults.clear();
+    updateRegionViews();
     stopFrameServer();
     m_index.reset();
     m_timeline->clearSource();
@@ -763,6 +829,8 @@ void MainWindow::startFrameServer()
         a->setEnabled(true);
     for (QAction *a : std::as_const(m_editActions))
         a->setEnabled(true);
+    m_regionPanel->setEnabledForRecording(true);
+    updateRegionViews();
     cutListChanged();
     m_position = 0;
     m_timeline->setPlayhead(0);
@@ -818,6 +886,8 @@ bool MainWindow::openFrameServer()
 void MainWindow::stopFrameServer()
 {
     m_playback->clear();
+    if (m_regionPanel)
+        m_regionPanel->setEnabledForRecording(false);
     ++m_serverGeneration;
     m_frameServer.reset(); // joins the worker
     for (QAction *a : std::as_const(m_navigationActions))
@@ -1279,7 +1349,7 @@ void MainWindow::analysisFinished()
         return;
     }
     setAnalysis(std::move(result));
-    statusBar()->showMessage(tr("Analysis complete: %n break(s) found (Shift+Up/Down to go through them)", nullptr,
+    statusBar()->showMessage(tr("Analysis complete: %n break(s) found (Shift+Up/Down to go through the cues)", nullptr,
                                 int(m_breaks.size())),
                              8000);
 }
@@ -1296,59 +1366,319 @@ void MainWindow::setAnalysis(std::unique_ptr<AnalysisData> analysis)
     m_timeline->setAnalysis(m_analysis.get(), m_candidates, m_breaks);
 }
 
+std::vector<MainWindow::Cue> MainWindow::cues() const
+{
+    std::vector<Cue> out;
+    for (size_t i = 0; i < m_breaks.size(); ++i) {
+        const BreakRegion &b = m_breaks[i];
+        const QString what = tr("break %1 of %2 (fades)").arg(i + 1).arg(m_breaks.size());
+        out.push_back({b.first > 0 ? b.first - 1 : 0, true, what});
+        out.push_back({b.last + 1, false, what});
+    }
+    if (m_regionResults.size() == m_regions.size()) {
+        for (size_t r = 0; r < m_regions.size(); ++r) {
+            const RegionResult &res = m_regionResults[r];
+            const bool programmeKind = m_regions[r].kind == WatchRegion::Kind::VisibleInProgramme;
+            for (uint32_t c : res.changes) {
+                const bool becomesShown = std::any_of(res.visible.begin(), res.visible.end(),
+                                                      [c](const auto &range) { return range.first == c; });
+                const bool programmeStarts = programmeKind == becomesShown;
+                const QString what = tr("region \"%1\"").arg(m_regions[r].name);
+                if (programmeStarts)
+                    out.push_back({c, false, what});
+                else
+                    out.push_back({c > 0 ? c - 1 : 0, true, what});
+            }
+        }
+    }
+    std::stable_sort(out.begin(), out.end(), [](const Cue &a, const Cue &b) { return a.frame < b.frame; });
+    // Methods agreeing on a frame make one cue.
+    std::vector<Cue> merged;
+    for (Cue &c : out) {
+        if (!merged.empty() && merged.back().frame == c.frame && merged.back().programmeEnds == c.programmeEnds)
+            merged.back().source += QStringLiteral(" + ") + c.source;
+        else
+            merged.push_back(std::move(c));
+    }
+    return merged;
+}
+
 void MainWindow::jumpToBreak(bool forward, bool separators)
 {
-    if (!m_analysis) {
-        statusBar()->showMessage(tr("Analyze the recording first (Analysis → Analyze Recording)"), 5000);
-        return;
-    }
-    // Targets: the frames where you would cut. For breaks, the last frame
-    // before one and the first frame after it; for separators, the first
-    // dark frame of each.
-    std::vector<uint32_t> targets;
     if (separators) {
+        if (!m_analysis) {
+            statusBar()->showMessage(tr("Find breaks by fades first (Analysis menu)"), 5000);
+            return;
+        }
+        std::vector<uint32_t> targets;
         for (const BreakCandidate &c : m_candidates)
             if (c.silent)
                 targets.push_back(c.first);
-    } else {
-        for (const BreakRegion &b : m_breaks) {
-            targets.push_back(b.first > 0 ? b.first - 1 : 0);
-            targets.push_back(b.last + 1);
+        auto it = forward ? std::upper_bound(targets.begin(), targets.end(), m_position)
+                          : std::lower_bound(targets.begin(), targets.end(), m_position);
+        if (forward ? it == targets.end() : it == targets.begin()) {
+            statusBar()->showMessage(forward ? tr("No more separators") : tr("No earlier separators"), 3000);
+            return;
         }
+        goTo(forward ? *it : *(it - 1));
+        return;
     }
-    std::sort(targets.begin(), targets.end());
-    uint32_t target = m_position;
+
+    // Cues: where the programme ends (last frame before a break: mark O) or
+    // resumes (first frame after it: mark I), from every method used.
+    const std::vector<Cue> all = cues();
+    if (all.empty()) {
+        statusBar()->showMessage(tr("No cues yet: find breaks by fades, or changes in regions (Analysis menu)"), 5000);
+        return;
+    }
+    const Cue *target = nullptr;
     if (forward) {
-        auto it = std::upper_bound(targets.begin(), targets.end(), m_position);
-        if (it == targets.end()) {
-            statusBar()->showMessage(separators ? tr("No more separators") : tr("No more breaks"), 3000);
-            return;
-        }
-        target = *it;
+        for (const Cue &c : all)
+            if (c.frame > m_position) {
+                target = &c;
+                break;
+            }
     } else {
-        auto it = std::lower_bound(targets.begin(), targets.end(), m_position);
-        if (it == targets.begin()) {
-            statusBar()->showMessage(separators ? tr("No earlier separators") : tr("No earlier breaks"), 3000);
-            return;
-        }
-        target = *(it - 1);
+        for (auto it = all.rbegin(); it != all.rend(); ++it)
+            if (it->frame < m_position) {
+                target = &*it;
+                break;
+            }
     }
-    goTo(target);
-    if (!separators) {
-        for (size_t i = 0; i < m_breaks.size(); ++i) {
-            const BreakRegion &b = m_breaks[i];
-            const PacketIndex::Stream *video = videoIndex();
-            const QString span = QStringLiteral("%1 – %2")
-                                     .arg(formatTime(m_index->frameTime(*video, b.first)),
-                                          formatTime(m_index->frameTime(*video, b.last)));
-            if (target + 1 == b.first)
-                statusBar()->showMessage(tr("Last frame before break %1 of %2 (%3): mark the end of a part with O")
-                                             .arg(i + 1).arg(m_breaks.size()).arg(span), 8000);
-            else if (target == b.last + 1)
-                statusBar()->showMessage(tr("First frame after break %1 of %2 (%3): mark the start of a part with I")
-                                             .arg(i + 1).arg(m_breaks.size()).arg(span), 8000);
+    if (!target) {
+        statusBar()->showMessage(forward ? tr("No more cues") : tr("No earlier cues"), 3000);
+        return;
+    }
+    goTo(target->frame);
+    const size_t number = size_t(target - all.data()) + 1;
+    statusBar()->showMessage(
+        (target->programmeEnds ? tr("Cue %1 of %2, %3: programme ends here (last frame): mark the end of a part with O")
+                               : tr("Cue %1 of %2, %3: programme resumes here (first frame): mark the start of a part with I"))
+            .arg(number)
+            .arg(all.size())
+            .arg(target->source),
+        8000);
+}
+
+// --- Regions (method 2) -----------------------------------------------------------
+
+void MainWindow::drawRegion()
+{
+    if (!m_frameServer) {
+        statusBar()->showMessage(tr("Open a recording first"), 3000);
+        return;
+    }
+    m_playback->stop();
+    m_regionsDock->show();
+    m_regionsDock->raise();
+    m_videoView->setDrawing(true);
+    statusBar()->showMessage(tr("Drag a rectangle around a text or logo shown on this frame (Esc to cancel)"), 8000);
+}
+
+void MainWindow::regionDrawn(const QRect &rect)
+{
+    const PacketIndex::Stream *video = videoIndex();
+    if (!video)
+        return;
+    // Reference: this frame and others over 4 s around it (one per second),
+    // so that only the steady overlay remains, not the picture behind it.
+    QApplication::setOverrideCursor(Qt::WaitCursor);
+    RandomAccessDecoder decoder;
+    QString error;
+    std::vector<FramePtr> frames;
+    if (decoder.open(m_file->path(), video->index, m_index, &error)) {
+        const int64_t now = m_index->frameTime(*video, m_position);
+        for (int k = -4; k <= 4; ++k) {
+            const uint32_t pos = k == 0 ? m_position : m_index->positionAtTime(*video, now + int64_t(k) * 1'000'000);
+            if (FramePtr f = decoder.frameAt(pos, &error))
+                frames.push_back(std::move(f));
         }
     }
+    std::vector<const AVFrame *> raw;
+    for (const FramePtr &f : frames)
+        raw.push_back(f.get());
+    WatchRegion region;
+    region.rect = rect;
+    const bool ok = !raw.empty() && captureTemplate(raw, region);
+    QApplication::restoreOverrideCursor();
+    if (!ok) {
+        QMessageBox::information(this, tr("Nothing to watch"),
+                                 tr("No steady text or logo was found in that rectangle around this frame. Draw it "
+                                    "tightly around a text or logo, on a frame where it is clearly shown."));
+        return;
+    }
+
+    QDialog dialog(this);
+    dialog.setWindowTitle(tr("New Region"));
+    auto *form = new QFormLayout(&dialog);
+    auto *name = new QLineEdit(tr("Region %1").arg(m_regions.size() + 1), &dialog);
+    name->setObjectName(QStringLiteral("regionName"));
+    auto *kind = new QComboBox(&dialog);
+    kind->setObjectName(QStringLiteral("regionKind"));
+    kind->addItem(tr("Shown during the programme"));
+    kind->addItem(tr("Shown during ads"));
+    kind->setCurrentIndex(1);
+    form->addRow(tr("Name:"), name);
+    form->addRow(tr("What it shows here:"), kind);
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    form->addRow(buttons);
+    if (dialog.exec() != QDialog::Accepted)
+        return;
+    region.name = name->text().trimmed().isEmpty() ? tr("Region %1").arg(m_regions.size() + 1) : name->text().trimmed();
+    region.kind = kind->currentIndex() == 0 ? WatchRegion::Kind::VisibleInProgramme : WatchRegion::Kind::VisibleInAds;
+    m_regions.push_back(std::move(region));
+    regionsChanged(false);
+    statusBar()->showMessage(tr("Region added: Find Changes (Ctrl+Shift+R) to look for it in the whole recording"), 6000);
+}
+
+void MainWindow::regionsChanged(bool keepResults)
+{
+    QSettings().setValue(QStringLiteral("regions"), QJsonDocument(regionsToJson(m_regions)).toJson(QJsonDocument::Compact));
+    if (!keepResults)
+        m_regionResults.clear();
+    m_regionPanel->setRegions(m_regions);
+    updateRegionViews();
+}
+
+void MainWindow::updateRegionViews()
+{
+    const QColor programme(76, 160, 92), ads(240, 150, 30);
+    // Rectangles on the picture while the Regions panel is on screen (a
+    // tabbed dock behind another tab still counts as "visible").
+    QList<VideoView::Overlay> overlays;
+    if (m_regionPanel && !m_regionPanel->visibleRegion().isEmpty()) {
+        for (const WatchRegion &r : m_regions) {
+            const QSize picture = r.pictureSize;
+            WatchRegion shown = r;
+            if (m_file && m_file->bestVideoStream() >= 0) {
+                const StreamInfo &v = m_file->streams()[size_t(m_file->bestVideoStream())];
+                if (v.width > 0 && QSize(v.width, v.height) != picture)
+                    shown = r.scaledTo(QSize(v.width, v.height));
+            }
+            overlays.append({shown.rect, r.kind == WatchRegion::Kind::VisibleInProgramme ? programme : ads, r.name});
+        }
+    }
+    m_videoView->setOverlays(overlays);
+
+    // Timeline lanes and change counts.
+    std::vector<Timeline::RegionLane> lanes;
+    std::vector<int> counts(m_regions.size(), -1);
+    if (m_regionResults.size() == m_regions.size()) {
+        for (size_t r = 0; r < m_regions.size(); ++r) {
+            QColor c = m_regions[r].kind == WatchRegion::Kind::VisibleInProgramme ? programme : ads;
+            c.setAlpha(170);
+            lanes.push_back({m_regions[r].name, c, m_regionResults[r].visible, m_regionResults[r].changes});
+            counts[r] = int(m_regionResults[r].changes.size());
+        }
+    }
+    m_timeline->setRegionLanes(std::move(lanes));
+    m_regionPanel->setResults(counts);
+}
+
+bool MainWindow::startRegionScan()
+{
+    const PacketIndex::Stream *video = videoIndex();
+    if (!video)
+        return false;
+    if (m_regions.empty()) {
+        statusBar()->showMessage(tr("Draw a region first (Analysis → Draw Region)"), 5000);
+        return false;
+    }
+    if (m_regionJob || m_analysisJob) {
+        statusBar()->showMessage(tr("Wait for the running analysis to finish"), 4000);
+        return false;
+    }
+    RegionScanSettings settings;
+    settings.minRunUs = int64_t(m_regionPanel->minChangeSeconds()) * 1'000'000;
+    m_regionJob = std::make_unique<RegionJob>();
+    connect(m_regionJob.get(), &RegionJob::progress, m_analysisProgress,
+            [this](double fraction) { m_analysisProgress->setValue(int(fraction * 1000)); });
+    connect(m_regionJob.get(), &RegionJob::finished, this, &MainWindow::regionScanFinished);
+    m_analysisProgress->setFormat(tr("Finding changes %p%"));
+    m_analysisProgress->setValue(0);
+    m_analysisProgress->setVisible(true);
+    m_analysisCancel->setVisible(true);
+    m_regionJob->start(m_file->path(), m_index, video->index, m_regions, settings);
+    return true;
+}
+
+void MainWindow::stopRegionScan()
+{
+    m_regionJob.reset(); // cancels and waits
+    if (m_analysisProgress && !m_analysisJob) {
+        m_analysisProgress->setVisible(false);
+        m_analysisCancel->setVisible(false);
+    }
+}
+
+void MainWindow::regionScanFinished()
+{
+    if (!m_regionJob)
+        return;
+    const bool ok = m_regionJob->succeeded(), canceled = m_regionJob->canceled();
+    const QString error = m_regionJob->error();
+    std::vector<RegionResult> results = m_regionJob->results();
+    m_regionJob.release()->deleteLater();
+    m_analysisProgress->setVisible(false);
+    m_analysisCancel->setVisible(false);
+    m_analysisProgress->setFormat(tr("Analyzing %p%"));
+    if (!ok) {
+        if (!canceled)
+            QMessageBox::warning(this, tr("Finding changes failed"), error);
+        return;
+    }
+    m_regionResults = std::move(results);
+    updateRegionViews();
+    size_t changes = 0;
+    for (const RegionResult &r : m_regionResults)
+        changes += r.changes.size();
+    statusBar()->showMessage(tr("%n change(s) found in the regions (Shift+Up/Down to go through the cues)", nullptr,
+                                int(changes)),
+                             8000);
+}
+
+QStringList MainWindow::regionPresetNames() const
+{
+    QSettings settings;
+    settings.beginGroup(QStringLiteral("regionPresets"));
+    QStringList names = settings.childKeys();
+    names.sort(Qt::CaseInsensitive);
+    return names;
+}
+
+void MainWindow::saveRegionPreset()
+{
+    bool ok = false;
+    const QString name = QInputDialog::getText(this, tr("Save Regions"), tr("Preset name (e.g. the channel):"),
+                                               QLineEdit::Normal, {}, &ok).trimmed();
+    if (!ok || name.isEmpty())
+        return;
+    QSettings settings;
+    settings.beginGroup(QStringLiteral("regionPresets"));
+    settings.setValue(name, QJsonDocument(regionsToJson(m_regions)).toJson(QJsonDocument::Compact));
+    settings.endGroup();
+    m_regionPanel->setPresetNames(regionPresetNames(), name);
+}
+
+void MainWindow::loadRegionPreset(const QString &name)
+{
+    QSettings settings;
+    settings.beginGroup(QStringLiteral("regionPresets"));
+    m_regions = regionsFromJson(QJsonDocument::fromJson(settings.value(name).toByteArray()).array());
+    settings.endGroup();
+    regionsChanged(false);
+    statusBar()->showMessage(tr("Regions of \"%1\" loaded").arg(name), 4000);
+}
+
+void MainWindow::deleteRegionPreset(const QString &name)
+{
+    QSettings settings;
+    settings.beginGroup(QStringLiteral("regionPresets"));
+    settings.remove(name);
+    settings.endGroup();
+    m_regionPanel->setPresetNames(regionPresetNames());
 }
 
 void MainWindow::showAbout()

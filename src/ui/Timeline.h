@@ -26,6 +26,14 @@ public:
     // Analysis lanes (darkness, loudness) and the breaks found; nullptr hides them.
     void setAnalysis(const AnalysisData *analysis, std::vector<BreakCandidate> candidates,
                      std::vector<BreakRegion> breaks);
+    // One lane per watched region: where it is shown, and its changes.
+    struct RegionLane {
+        QString name;
+        QColor color;
+        std::vector<std::pair<uint32_t, uint32_t>> shown;
+        std::vector<uint32_t> changes;
+    };
+    void setRegionLanes(std::vector<RegionLane> lanes);
     void setPlayhead(uint32_t pos);
 
     void zoomIn();
@@ -86,6 +94,7 @@ private:
     std::vector<BreakCandidate> m_candidates;
     std::vector<BreakRegion> m_breaks;
     std::vector<uint32_t> m_subtitleFrames; // frames where a subtitle starts
+    std::vector<RegionLane> m_regionLanes;
     // Cached per-column lane values, valid for m_columnsKey.
     std::vector<uint8_t> m_darkColumns, m_loudColumns;
     std::tuple<double, double, int> m_columnsKey{-1, -1, -1};

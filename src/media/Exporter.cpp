@@ -127,10 +127,13 @@ bool exportMatroska(const QString &inputPath, const PacketIndex &index, const Ex
                 continue; // open-GOP leading picture (or not displayable)
             vplan.segmentOf[d] = int32_t(si);
             ++vplan.planned;
-            if (pos > int32_t(seg.out))
+            if (pos > int32_t(seg.out)) {
                 ++info.extraFrames;
+                info.extraPositions.push_back(uint32_t(pos));
+            }
             sp.endUs = std::max(sp.endUs, index.unifiedPts(*video, d) + settings.frameDurationUs);
         }
+        std::sort(info.extraPositions.begin(), info.extraPositions.end());
         info.durationUs = sp.endUs - sp.startUs;
         report.segments.push_back(info);
         segPlans.push_back(sp);

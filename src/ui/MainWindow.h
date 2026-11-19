@@ -1,6 +1,7 @@
 #pragma once
 
 #include "analysis/AnalysisJob.h"
+#include "analysis/RegionJob.h"
 #include "media/ExportJob.h"
 #include "media/FrameDecoder.h"
 #include "media/FrameServer.h"
@@ -13,6 +14,7 @@
 #include <QMainWindow>
 #include <memory>
 
+class QDockWidget;
 class QLabel;
 class QProgressBar;
 class QProgressDialog;
@@ -22,6 +24,7 @@ namespace adscutter {
 
 class NavigationBar;
 class PlaybackController;
+class RegionPanel;
 class SegmentPanel;
 class StreamPanel;
 class Timeline;
@@ -43,6 +46,11 @@ public:
     bool startAnalysis();
     bool isAnalyzing() const { return m_analysisJob != nullptr; }
     const std::vector<BreakRegion> &breaks() const { return m_breaks; }
+    // Method 2: watched regions.
+    const std::vector<WatchRegion> &regions() const { return m_regions; }
+    bool startRegionScan();
+    bool isScanningRegions() const { return m_regionJob != nullptr; }
+    const std::vector<RegionResult> &regionResults() const { return m_regionResults; }
 
 protected:
     void closeEvent(QCloseEvent *event) override;
@@ -85,6 +93,22 @@ private:
     void analysisFinished();
     void setAnalysis(std::unique_ptr<AnalysisData> analysis);
     void jumpToBreak(bool forward, bool separators);
+    struct Cue {
+        uint32_t frame;      // where to put the mark
+        bool programmeEnds;  // O here; otherwise the programme resumes: I
+        QString source;
+    };
+    std::vector<Cue> cues() const;
+    void drawRegion();
+    void regionDrawn(const QRect &rect);
+    void regionsChanged(bool keepResults);
+    void updateRegionViews();
+    void regionScanFinished();
+    void stopRegionScan();
+    void saveRegionPreset();
+    void loadRegionPreset(const QString &name);
+    void deleteRegionPreset(const QString &name);
+    QStringList regionPresetNames() const;
     void navigate(Step step);
     void goTo(int64_t pos);
     void showPosition(uint32_t pos); // move without stopping playback
@@ -144,6 +168,11 @@ private:
     std::vector<BreakCandidate> m_candidates;
     std::vector<BreakRegion> m_breaks;
     QProgressBar *m_analysisProgress = nullptr;
+    RegionPanel *m_regionPanel = nullptr;
+    QDockWidget *m_regionsDock = nullptr;
+    std::vector<WatchRegion> m_regions;
+    std::vector<RegionResult> m_regionResults;
+    std::unique_ptr<RegionJob> m_regionJob;
     QToolButton *m_analysisCancel = nullptr;
     QProgressDialog *m_exportProgress = nullptr;
     // Bumped whenever a job is replaced, so late signals of an old job are ignored.
