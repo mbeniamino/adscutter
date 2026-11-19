@@ -11,6 +11,11 @@ cutlist_test = executable('cutlist_test', 'cutlist_test.cpp',
 )
 test('cut list model', cutlist_test)
 
+proposal_test = executable('proposal_test', 'proposal_test.cpp',
+  dependencies: media_dep,
+)
+test('cut list proposal', proposal_test)
+
 probe_test = executable('probe_test', 'probe_test.cpp',
   dependencies: media_dep,
 )

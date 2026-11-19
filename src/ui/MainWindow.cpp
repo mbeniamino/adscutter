@@ -431,6 +431,34 @@ void MainWindow::createMenus()
     findRegions->setToolTip(tr("Find where the watched regions (Regions panel) change"));
     QAction *draw = analysisMenu->addAction(tr("&Draw Region…"), this, &MainWindow::drawRegion);
     analysisMenu->addSeparator();
+    QAction *propose = analysisMenu->addAction(tr("&Propose Cut List"), QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_C),
+                                               this, &MainWindow::proposeCutList);
+    propose->setToolTip(tr("Keep what every method found to be programme (replaces the cut list; Ctrl+Z undoes it)"));
+    QMenu *startMenu = analysisMenu->addMenu(tr("&Start Parts at"));
+    auto *startGroup = new QActionGroup(this);
+    m_startAt = QSettings().value(QStringLiteral("proposalStartAt")).toString() == QStringLiteral("after")
+                    ? ProposalSettings::StartAt::CutPointAfter
+                    : ProposalSettings::StartAt::CutPointBefore;
+    const std::pair<ProposalSettings::StartAt, QString> starts[] = {
+        {ProposalSettings::StartAt::CutPointBefore,
+         tr("Cut Point &Before the Programme Resumes (may show the end of the break)")},
+        {ProposalSettings::StartAt::CutPointAfter,
+         tr("Cut Point &After the Programme Resumes (may lose its first second)")},
+    };
+    for (const auto &[value, text] : starts) {
+        QAction *a = startMenu->addAction(text);
+        a->setCheckable(true);
+        a->setChecked(value == m_startAt);
+        startGroup->addAction(a);
+        const auto choice = value;
+        connect(a, &QAction::triggered, this, [this, choice] {
+            m_startAt = choice;
+            QSettings().setValue(QStringLiteral("proposalStartAt"),
+                                 choice == ProposalSettings::StartAt::CutPointAfter ? QStringLiteral("after")
+                                                                                     : QStringLiteral("before"));
+        });
+    }
+    analysisMenu->addSeparator();
     QAction *nextBreak = analysisMenu->addAction(tr("&Next Cue"), QKeySequence(Qt::SHIFT | Qt::Key_Up),
                                                  this, [this] { jumpToBreak(true, false); });
     QAction *previousBreak = analysisMenu->addAction(tr("&Previous Cue"), QKeySequence(Qt::SHIFT | Qt::Key_Down),
@@ -440,7 +468,7 @@ void MainWindow::createMenus()
     QAction *previousSeparator = analysisMenu->addAction(tr("Previous S&eparator"),
                                                          QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_Down),
                                                          this, [this] { jumpToBreak(false, true); });
-    for (QAction *a : {analyze, findRegions, draw, nextBreak, previousBreak, nextSeparator, previousSeparator}) {
+    for (QAction *a : {analyze, findRegions, draw, propose, nextBreak, previousBreak, nextSeparator, previousSeparator}) {
         a->setEnabled(false);
         m_editActions << a;
         addAction(a);
@@ -1077,6 +1105,70 @@ void MainWindow::previewCuts()
     }
     m_playback->setAudioStream(playbackAudioStream());
     m_playback->playRanges(std::move(merged), m_position);
+}
+
+void MainWindow::proposeCutList()
+{
+    const PacketIndex::Stream *video = videoIndex();
+    if (!video)
+        return;
+    const auto frames = uint32_t(video->displayOrder.size());
+
+    // Regions decide where the programme is (every region must agree);
+    // fades only make the boundaries frame exact. Without regions, the
+    // fades decide.
+    FrameRanges breaks;
+    for (const BreakRegion &b : m_breaks)
+        breaks.emplace_back(b.first, b.last);
+    FrameRanges programme;
+    QString from;
+    if (m_regionResults.size() == m_regions.size() && !m_regions.empty()) {
+        std::vector<FrameRanges> sources;
+        for (size_t r = 0; r < m_regions.size(); ++r) {
+            const FrameRanges &shown = m_regionResults[r].visible;
+            sources.push_back(m_regions[r].kind == WatchRegion::Kind::VisibleInProgramme ? shown
+                                                                                         : complementOf(shown, frames));
+        }
+        programme = intersectAll(sources, frames);
+        from = tr("%n region(s)", nullptr, int(m_regions.size()));
+        if (m_analysis) {
+            const auto tolerance = uint32_t(3'000'000 / frameDurationUs()); // 3 s
+            programme = snapToBreaks(programme, breaks, tolerance);
+            from += tr(", edges refined by fades");
+        }
+    } else if (m_analysis) {
+        programme = complementOf(breaks, frames);
+        from = tr("fades");
+    } else {
+        statusBar()->showMessage(tr("Nothing to propose from: find breaks by fades, or changes in regions first"), 6000);
+        return;
+    }
+    const QStringList names{from};
+
+    ProposalSettings settings;
+    settings.startAt = m_startAt;
+    // Pieces shorter than 5 s are slivers where the sources disagree slightly.
+    settings.minFrames = uint32_t(std::max<int64_t>(1, 5'000'000 / frameDurationUs()));
+    const Proposal proposal = proposeSegments(programme, video->keyframes, frames, settings);
+    if (proposal.segments.empty()) {
+        statusBar()->showMessage(tr("No programme found by %1").arg(names.join(tr(" and "))), 6000);
+        return;
+    }
+
+    m_cutList.checkpoint();
+    m_cutList.clearMarks();
+    m_cutList.setSegments(proposal.segments);
+    cutListChanged();
+
+    const uint32_t worst = *std::max_element(proposal.startOffsets.begin(), proposal.startOffsets.end());
+    const double worstSeconds = double(worst) * double(frameDurationUs()) / 1e6;
+    const QString starts = m_startAt == ProposalSettings::StartAt::CutPointBefore
+                               ? tr("parts start up to %1 s before the programme resumes").arg(worstSeconds, 0, 'f', 1)
+                               : tr("parts start up to %1 s after the programme resumes").arg(worstSeconds, 0, 'f', 1);
+    statusBar()->showMessage(tr("Proposed %n part(s) from %1; %2 (Shift+P to check the cuts, Ctrl+Z to undo)", nullptr,
+                                int(proposal.segments.size()))
+                                 .arg(names.join(tr(" and ")), starts),
+                             10000);
 }
 
 void MainWindow::stopAtPreview()

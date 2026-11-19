@@ -412,16 +412,26 @@ std::vector<RegionResult> scanRegions(const QString &path, std::shared_ptr<const
             return 0;
         }();
 
-        // Exact frame: one after the last frame still in the old state.
+        // Exact frame. Frames that cannot tell (e.g. a spot in a squeezed
+        // layout covering the logo) are never taken for programme: when the
+        // programme resumes, the change is at the first frame clearly in
+        // the new state; when it ends, right after the last frame clearly
+        // in the old one.
+        const bool programmeKind = regions[r].kind == WatchRegion::Kind::VisibleInProgramme;
         int current = initial;
         for (const auto &[from, to] : transitions) {
+            const int next = 1 - current;
+            const bool programmeResumes = programmeKind == (next == 1);
             uint32_t change = to;
             for (uint32_t f = to; f-- > from;) {
                 QString ignored;
                 FramePtr fr = exact.frameAt(f, &ignored);
                 if (!fr)
                     continue;
-                if (classify(matchScore(regions[r], regionEdges(fr.get(), regions[r].rect), &mask), limits) == current) {
+                const int state =
+                    classify(matchScore(regions[r], regionEdges(fr.get(), regions[r].rect), &mask), limits);
+                const bool stop = programmeResumes ? state != next : state == current;
+                if (stop) {
                     change = f + 1;
                     break;
                 }

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "analysis/AnalysisJob.h"
+#include "analysis/Proposal.h"
 #include "analysis/RegionJob.h"
 #include "media/ExportJob.h"
 #include "media/FrameDecoder.h"
@@ -117,6 +118,7 @@ private:
     void previewCues();
     void previewCuts();
     void stopAtPreview(); // stops on the frame the current preview is about
+    void proposeCutList();
     int playbackAudioStream() const;
     void showFrame(const DisplayFrame &frame);
     const PacketIndex::Stream *videoIndex() const;
@@ -156,6 +158,7 @@ private:
     QAction *m_keptOnlyAction = nullptr;
     QAction *m_muteAction = nullptr;
     QList<QAction *> m_previewActions;
+    ProposalSettings::StartAt m_startAt = ProposalSettings::StartAt::CutPointBefore;
     PlaybackController *m_playback = nullptr;
     QAction *m_undoAction = nullptr;
     QAction *m_redoAction = nullptr;

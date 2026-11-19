@@ -8,6 +8,8 @@
 #include "ui/VideoView.h"
 
 #include <QApplication>
+#include <QAction>
+#include <QStatusBar>
 #include <QElapsedTimer>
 #include <QComboBox>
 #include <QDialog>
@@ -269,6 +271,34 @@ int main(int argc, char **argv)
     if (!cutsOk)
         ++failures;
     QTest::keyClick(&window, Qt::Key_Space); // stop
+
+    // --- Proposed cut list --------------------------------------------------------
+    // Programme by every source: fades -> [0, fade-1] and [1224, end];
+    // region "MEDIASET" (ads) -> [0, 499] and [1224, end]. The second part
+    // starts at a cut point (every 96 frames): 1152 before 1224, 1248 after.
+    const uint32_t fade = window.breaks().front().first, end = 1823;
+    auto expectParts = [&](std::vector<Segment> want, const char *what) {
+        const bool ok = window.cutList().segments() == want;
+        QString got;
+        for (const Segment &x : window.cutList().segments())
+            got += QStringLiteral("[%1,%2] ").arg(x.in).arg(x.out);
+        std::printf("%-34s -> %s%s\n", what, qPrintable(got), ok ? "" : " <-- FAIL");
+        if (!ok)
+            ++failures;
+    };
+    QTest::keyClick(&window, Qt::Key_C, Qt::ControlModifier | Qt::ShiftModifier);
+    expectParts({{0, fade - 1}, {1152, end}}, "propose (cut point before)");
+    std::printf("%-34s -> %s\n", "", qPrintable(window.statusBar()->currentMessage()));
+    for (QAction *a : window.findChildren<QAction *>())
+        if (a->text().startsWith(QStringLiteral("Cut Point &After")))
+            a->trigger();
+    QTest::keyClick(&window, Qt::Key_C, Qt::ControlModifier | Qt::ShiftModifier);
+    expectParts({{0, fade - 1}, {1248, end}}, "propose (cut point after)");
+    QTest::keyClick(&window, Qt::Key_Z, Qt::ControlModifier);
+    expectParts({{0, fade - 1}, {1152, end}}, "Ctrl+Z: previous proposal");
+    for (QAction *a : window.findChildren<QAction *>())
+        if (a->text().startsWith(QStringLiteral("Cut Point &Before")))
+            a->trigger();
 
     if (argc >= 3) {
         QTest::qWait(300);
