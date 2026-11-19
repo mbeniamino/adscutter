@@ -299,7 +299,7 @@ if qt_test.found()
     args: [fixture_targets['broadcast_like.mkv']],
     depends: fixture_targets['broadcast_like.mkv'],
     env: gui_env,
-    timeout: 120,
+    timeout: 180,
   )
 endif
 

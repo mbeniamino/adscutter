@@ -55,26 +55,50 @@ void PlaybackController::play(uint32_t fromPos)
     const PacketIndex::Stream *v = video();
     if (!v || v->displayOrder.empty())
         return;
+    if (m_keptOnly && m_cutList && !m_cutList->isEmpty()) {
+        std::vector<Range> ranges;
+        const auto &segs = m_cutList->segments();
+        for (size_t i = 0; i < segs.size(); ++i)
+            ranges.push_back({segs[i].in, segs[i].out, segs[i].in, tr("part %1 of %2").arg(i + 1).arg(segs.size())});
+        playRanges(std::move(ranges), fromPos);
+        return;
+    }
+    if (m_keptOnly)
+        emit message(tr("No kept parts yet: playing everything"));
     const uint32_t last = uint32_t(v->displayOrder.size()) - 1;
     if (fromPos >= last)
         fromPos = 0; // at the end: start over
-
-    m_segment = -1;
-    if (m_keptOnly && m_cutList && !m_cutList->isEmpty()) {
-        const auto &segs = m_cutList->segments();
-        // The segment containing the position, else the next one, else the first.
-        m_segment = m_cutList->segmentAt(fromPos);
-        if (m_segment < 0) {
-            auto it = std::find_if(segs.begin(), segs.end(), [&](const Segment &s) { return s.in > fromPos; });
-            m_segment = it != segs.end() ? int(it - segs.begin()) : 0;
-            fromPos = segs[size_t(m_segment)].in;
-        }
-    } else if (m_keptOnly) {
-        emit message(tr("No kept parts yet: playing everything"));
-    }
+    m_ranges.clear();
+    m_range = -1;
     startAt(fromPos);
     m_timer.start();
     emit stateChanged(true);
+}
+
+void PlaybackController::playRanges(std::vector<Range> ranges, uint32_t fromPos)
+{
+    if (!video() || ranges.empty())
+        return;
+    m_ranges = std::move(ranges);
+    // The first range not entirely before the position, else from the start.
+    int index = 0;
+    for (size_t i = 0; i < m_ranges.size(); ++i) {
+        if (m_ranges[i].last >= fromPos) {
+            index = int(i);
+            break;
+        }
+    }
+    const Range &r = m_ranges[size_t(index)];
+    startRange(index, fromPos > r.first && fromPos < r.last ? fromPos : r.first);
+    m_timer.start();
+    emit stateChanged(true);
+}
+
+void PlaybackController::startRange(int index, uint32_t from)
+{
+    m_range = index;
+    startAt(from);
+    emit rangeStarted(index, int(m_ranges.size()), m_ranges[size_t(index)].label);
 }
 
 void PlaybackController::startAt(uint32_t pos)
@@ -126,21 +150,12 @@ void PlaybackController::tick()
     pos = std::max(pos, m_lastPos); // never backwards
     const uint32_t last = uint32_t(v->displayOrder.size()) - 1;
 
-    if (m_segment >= 0 && m_cutList) {
-        const auto &segs = m_cutList->segments();
-        if (size_t(m_segment) >= segs.size()) {
+    if (m_range >= 0 && pos > m_ranges[size_t(m_range)].last) {
+        if (size_t(m_range) + 1 < m_ranges.size())
+            startRange(m_range + 1, m_ranges[size_t(m_range) + 1].first);
+        else
             stop();
-            return;
-        }
-        if (pos > segs[size_t(m_segment)].out) {
-            if (size_t(m_segment) + 1 < segs.size()) {
-                ++m_segment;
-                startAt(segs[size_t(m_segment)].in);
-            } else {
-                stop();
-            }
-            return;
-        }
+        return;
     }
 
     if (pos != m_lastPos) {

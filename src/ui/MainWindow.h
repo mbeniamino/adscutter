@@ -113,6 +113,10 @@ private:
     void goTo(int64_t pos);
     void showPosition(uint32_t pos); // move without stopping playback
     void togglePlayback();
+    // Smart play: a few seconds around each cue / each cut, nothing else.
+    void previewCues();
+    void previewCuts();
+    void stopAtPreview(); // stops on the frame the current preview is about
     int playbackAudioStream() const;
     void showFrame(const DisplayFrame &frame);
     const PacketIndex::Stream *videoIndex() const;
@@ -151,6 +155,7 @@ private:
     QAction *m_playAction = nullptr;
     QAction *m_keptOnlyAction = nullptr;
     QAction *m_muteAction = nullptr;
+    QList<QAction *> m_previewActions;
     PlaybackController *m_playback = nullptr;
     QAction *m_undoAction = nullptr;
     QAction *m_redoAction = nullptr;

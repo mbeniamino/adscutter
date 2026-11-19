@@ -42,6 +42,8 @@ namespace adscutter {
 
 namespace {
 
+constexpr int64_t kPreviewUs = 3'000'000; // smart play: before and after each cue or cut
+
 QString formatTime(int64_t us)
 {
     if (us < 0)
@@ -171,6 +173,10 @@ MainWindow::MainWindow(QWidget *parent)
     connect(m_playback, &PlaybackController::positionChanged, this, [this](quint32 pos) { showPosition(pos); });
     connect(m_playback, &PlaybackController::message, this, [this](const QString &text) {
         statusBar()->showMessage(text, 5000);
+    });
+    connect(m_playback, &PlaybackController::rangeStarted, this, [this](int index, int count, const QString &label) {
+        statusBar()->showMessage(tr("Preview %1 of %2: %3 · Enter: stop there · Space: stop")
+                                     .arg(index + 1).arg(count).arg(label));
     });
     connect(m_playback, &PlaybackController::stateChanged, this, [this](bool playing) {
         if (m_frameServer)
@@ -325,6 +331,25 @@ void MainWindow::createActions()
     });
     addAction(m_keptOnlyAction);
 
+    auto *previewCuesAction = new QAction(tr("Preview C&ues"), this);
+    previewCuesAction->setShortcut(Qt::Key_P);
+    previewCuesAction->setToolTip(tr("Play 3 s before and after each cue, skipping the rest"));
+    connect(previewCuesAction, &QAction::triggered, this, &MainWindow::previewCues);
+    auto *previewCutsAction = new QAction(tr("Preview C&uts"), this);
+    previewCutsAction->setShortcut(QKeySequence(Qt::SHIFT | Qt::Key_P));
+    previewCutsAction->setToolTip(tr("Play each cut as the exported file will show it: the last 3 s of a part, "
+                                     "then the first 3 s of the next one"));
+    connect(previewCutsAction, &QAction::triggered, this, &MainWindow::previewCuts);
+    auto *stopAtAction = new QAction(tr("Stop at the Previewed Cue or Cut"), this);
+    stopAtAction->setShortcuts({QKeySequence(Qt::Key_Return), QKeySequence(Qt::Key_Enter)});
+    connect(stopAtAction, &QAction::triggered, this, &MainWindow::stopAtPreview);
+    for (QAction *a : {previewCuesAction, previewCutsAction, stopAtAction}) {
+        a->setEnabled(false);
+        m_editActions << a;
+        addAction(a);
+    }
+    m_previewActions = {previewCuesAction, previewCutsAction, stopAtAction};
+
     m_muteAction = new QAction(tr("&Mute"), this);
     m_muteAction->setCheckable(true);
     m_muteAction->setShortcut(Qt::Key_M);
@@ -386,6 +411,8 @@ void MainWindow::createMenus()
     QMenu *goMenu = menuBar()->addMenu(tr("&Go"));
     goMenu->addAction(m_playAction);
     goMenu->addAction(m_keptOnlyAction);
+    for (QAction *a : std::as_const(m_previewActions))
+        goMenu->addAction(a);
     goMenu->addAction(m_muteAction);
     goMenu->addSeparator();
     for (int i = 0; i < m_navigationActions.size(); ++i) {
@@ -979,6 +1006,86 @@ int MainWindow::playbackAudioStream() const
         if (s.type == AVMEDIA_TYPE_AUDIO)
             return s.index;
     return -1;
+}
+
+void MainWindow::previewCues()
+{
+    const PacketIndex::Stream *video = videoIndex();
+    if (!video || !m_frameServer)
+        return;
+    const std::vector<Cue> all = cues();
+    if (all.empty()) {
+        statusBar()->showMessage(tr("No cues to preview: find breaks by fades, or changes in regions (Analysis menu)"),
+                                 5000);
+        return;
+    }
+    const auto last = uint32_t(video->displayOrder.size()) - 1;
+    std::vector<PlaybackController::Range> ranges;
+    for (const Cue &c : all) {
+        const int64_t t = m_index->frameTime(*video, c.frame);
+        const uint32_t first = m_index->positionAtTime(*video, t - kPreviewUs);
+        const uint32_t end = std::min(last, m_index->positionAtTime(*video, t + kPreviewUs));
+        const QString label = (c.programmeEnds ? tr("programme ends, %1") : tr("programme resumes, %1")).arg(c.source);
+        // Cues closer than the preview length share one stretch.
+        if (!ranges.empty() && first <= ranges.back().last + 1) {
+            ranges.back().last = std::max(ranges.back().last, end);
+            ranges.back().label += QStringLiteral("; ") + label;
+        } else {
+            ranges.push_back({first, end, c.frame, label});
+        }
+    }
+    m_playback->setAudioStream(playbackAudioStream());
+    m_playback->playRanges(std::move(ranges), m_position);
+}
+
+void MainWindow::previewCuts()
+{
+    const PacketIndex::Stream *video = videoIndex();
+    if (!video || !m_frameServer)
+        return;
+    const auto &segs = m_cutList.segments();
+    if (segs.empty()) {
+        statusBar()->showMessage(tr("No cuts to preview: mark the parts to keep first (I and O)"), 5000);
+        return;
+    }
+    // What the exported file will show around each cut: the start of the
+    // first part, each join (the end of a part, then the start of the next)
+    // and the end of the last part.
+    auto startOf = [&](const Segment &s) {
+        return std::min(s.out, m_index->positionAtTime(*video, m_index->frameTime(*video, s.in) + kPreviewUs));
+    };
+    auto endOf = [&](const Segment &s) {
+        return std::max(s.in, m_index->positionAtTime(*video, m_index->frameTime(*video, s.out) - kPreviewUs));
+    };
+    std::vector<PlaybackController::Range> ranges;
+    const auto n = segs.size();
+    for (size_t i = 0; i < n; ++i) {
+        ranges.push_back({segs[i].in, startOf(segs[i]), segs[i].in,
+                          i == 0 ? tr("start of part 1 of %1").arg(n) : tr("cut %1 of %2: start of part %3").arg(i).arg(n - 1).arg(i + 1)});
+        ranges.push_back({endOf(segs[i]), segs[i].out, segs[i].out,
+                          i + 1 == n ? tr("end of part %1 of %1").arg(n) : tr("cut %1 of %2: end of part %3").arg(i + 1).arg(n - 1).arg(i + 1)});
+    }
+    // Within a short part both stretches meet: play it once.
+    std::vector<PlaybackController::Range> merged;
+    for (auto &r : ranges) {
+        if (!merged.empty() && r.first <= merged.back().last + 1) {
+            merged.back().last = std::max(merged.back().last, r.last);
+            merged.back().label += QStringLiteral("; ") + r.label;
+        } else {
+            merged.push_back(std::move(r));
+        }
+    }
+    m_playback->setAudioStream(playbackAudioStream());
+    m_playback->playRanges(std::move(merged), m_position);
+}
+
+void MainWindow::stopAtPreview()
+{
+    if (!m_playback->isPlayingRanges())
+        return;
+    const PlaybackController::Range range = m_playback->currentRange();
+    goTo(range.anchor); // stops playing
+    statusBar()->showMessage(tr("Stopped at: %1").arg(range.label), 6000);
 }
 
 void MainWindow::togglePlayback()

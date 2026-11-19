@@ -8,6 +8,7 @@
 #include "ui/VideoView.h"
 
 #include <QApplication>
+#include <QElapsedTimer>
 #include <QComboBox>
 #include <QDialog>
 #include <QLineEdit>
@@ -190,6 +191,84 @@ int main(int argc, char **argv)
     std::printf("%-34s -> %s\n", "regions kept in the settings", saved ? "yes" : "NO");
     if (!saved)
         ++failures;
+
+    // --- Smart play ---------------------------------------------------------------
+    // Records the frames shown (1-based, as the label counts) for `ms`.
+    // The label still shows the previous frame for a moment: skipped.
+    auto watch = [&](int ms) {
+        const int before = shownFrame(info);
+        std::vector<int> shown;
+        QElapsedTimer t;
+        t.start();
+        while (t.elapsed() < ms) {
+            QTest::qWait(5);
+            const int f = shownFrame(info);
+            if ((shown.empty() && f == before) || (!shown.empty() && shown.back() == f))
+                continue;
+            shown.push_back(f);
+        }
+        return shown;
+    };
+    auto inside = [](int f, std::initializer_list<std::pair<int, int>> ranges) {
+        for (const auto &[a, b] : ranges)
+            if (f >= a && f <= b)
+                return true;
+        return false;
+    };
+
+    // Cues: the fade (beforeBreak, shown 1-based) and the region (500) are
+    // less than 6 s apart and share one stretch, from 3 s (150 frames)
+    // before the first to 3 s after the second; then 1225 +- 150.
+    const int firstStart = beforeBreak - 150, firstEnd = 500 + 150;
+    QTest::keyClick(&window, Qt::Key_Home);
+    expectFrame(info, 1, "Home (before preview)");
+    QTest::keyClick(&window, Qt::Key_P);
+    auto shown = watch(7500);
+    const bool cuesOk = !shown.empty() && std::abs(shown.front() - firstStart) <= 5
+                        && std::all_of(shown.begin(), shown.end(),
+                                       [&](int f) { return inside(f, {{firstStart, firstEnd}, {1075, 1375}}); })
+                        && shown.back() >= 1075;
+    std::printf("%-34s -> frames %d..%d, %s\n", "P: preview cues 7.5 s", shown.front(), shown.back(),
+                cuesOk ? "only around the cues" : "WRONG");
+    if (!cuesOk)
+        ++failures;
+    // Enter during the second stretch: stop on its cue.
+    QTest::keyClick(&window, Qt::Key_Return);
+    expectFrame(info, 1225, "Enter: stopped at the cue");
+
+    // A cut list made with the keys: I at the start, O at the fade cue, I
+    // where the programme resumes, O at the end.
+    QTest::keyClick(&window, Qt::Key_Home);
+    QTest::keyClick(&window, Qt::Key_I);
+    QTest::keyClick(&window, Qt::Key_Up, Qt::ShiftModifier);
+    expectFrame(info, beforeBreak, "to the fade cue");
+    QTest::keyClick(&window, Qt::Key_O);
+    QTest::keyClick(&window, Qt::Key_Up, Qt::ShiftModifier);
+    QTest::keyClick(&window, Qt::Key_Up, Qt::ShiftModifier);
+    expectFrame(info, 1225, "to the resume cue");
+    QTest::keyClick(&window, Qt::Key_I);
+    QTest::keyClick(&window, Qt::Key_End);
+    QTest::keyClick(&window, Qt::Key_O);
+    const auto &segs = window.cutList().segments();
+    std::printf("%-34s -> %zu parts\n", "cut list", segs.size());
+    if (segs.size() != 2)
+        return 1;
+
+    // Cuts as exported: start of part 1, end of part 1, start of part 2...
+    const int end1 = int(segs[0].out) + 1, start2 = int(segs[1].in) + 1; // 1-based
+    QTest::keyClick(&window, Qt::Key_Home);
+    QTest::keyClick(&window, Qt::Key_P, Qt::ShiftModifier);
+    shown = watch(7500);
+    const bool cutsOk =
+        std::all_of(shown.begin(), shown.end(),
+                    [&](int f) { return inside(f, {{1, 151}, {end1 - 151, end1}, {start2, start2 + 151}}); })
+        && std::any_of(shown.begin(), shown.end(), [&](int f) { return f > end1 - 20 && f <= end1; })
+        && std::any_of(shown.begin(), shown.end(), [&](int f) { return f >= start2 && f < start2 + 20; });
+    std::printf("%-34s -> frames %d..%d, %s\n", "Shift+P: preview cuts 7.5 s", shown.front(), shown.back(),
+                cutsOk ? "start, end of part 1, start of part 2" : "WRONG");
+    if (!cutsOk)
+        ++failures;
+    QTest::keyClick(&window, Qt::Key_Space); // stop
 
     if (argc >= 3) {
         QTest::qWait(300);
