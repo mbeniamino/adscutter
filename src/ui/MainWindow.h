@@ -11,7 +11,9 @@
 #include "media/MediaFile.h"
 #include "media/PacketIndex.h"
 #include "model/CutList.h"
+#include "ui/Playback.h"
 
+#include <QColor>
 #include <QMainWindow>
 #include <memory>
 
@@ -24,7 +26,6 @@ class QToolButton;
 namespace adscutter {
 
 class NavigationBar;
-class PlaybackController;
 class RegionPanel;
 class SegmentPanel;
 class StreamPanel;
@@ -118,6 +119,15 @@ private:
     void previewCues();
     void previewCuts();
     void stopAtPreview(); // stops on the frame the current preview is about
+    // A cue or cut a preview is about: a marker flashes on the video when
+    // its frame is shown.
+    struct PreviewMark {
+        uint32_t frame;
+        QString text;
+        QColor color;
+    };
+    void startPreview(std::vector<PlaybackController::Range> ranges, std::vector<PreviewMark> marks);
+    void showPreviewMarks(uint32_t shownPos);
     void proposeCutList();
     int playbackAudioStream() const;
     void showFrame(const DisplayFrame &frame);
@@ -160,6 +170,10 @@ private:
     QList<QAction *> m_previewActions;
     ProposalSettings::StartAt m_startAt = ProposalSettings::StartAt::CutPointBefore;
     PlaybackController *m_playback = nullptr;
+    std::vector<PreviewMark> m_previewMarks; // sorted by frame; only while previewing
+    int64_t m_marksShownUpTo = -1;           // marks up to this frame have been shown
+    int m_lastMark = -1;                     // the mark flashed last
+    QTimer *m_markerTimer = nullptr;         // hides the marker
     QAction *m_undoAction = nullptr;
     QAction *m_redoAction = nullptr;
     QList<QAction *> m_navigationActions;

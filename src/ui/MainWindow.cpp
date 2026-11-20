@@ -43,6 +43,12 @@ namespace adscutter {
 namespace {
 
 constexpr int64_t kPreviewUs = 3'000'000; // smart play: before and after each cue or cut
+constexpr int kMarkerMs = 1000;           // how long a preview marker stays on the video
+
+// Preview marker colours.
+const QColor kProgrammeEndsColor(0xf0, 0x50, 0x50);
+const QColor kProgrammeResumesColor(0x50, 0xd0, 0x70);
+const QColor kCutColor(0xf0, 0xc0, 0x30);
 
 QString formatTime(int64_t us)
 {
@@ -178,9 +184,15 @@ MainWindow::MainWindow(QWidget *parent)
         statusBar()->showMessage(tr("Preview %1 of %2: %3 · Enter: stop there · Space: stop")
                                      .arg(index + 1).arg(count).arg(label));
     });
+    m_markerTimer = new QTimer(this);
+    m_markerTimer->setSingleShot(true);
+    m_markerTimer->setInterval(kMarkerMs);
+    connect(m_markerTimer, &QTimer::timeout, m_videoView, &VideoView::clearMarker);
     connect(m_playback, &PlaybackController::stateChanged, this, [this](bool playing) {
         if (m_frameServer)
             m_frameServer->setPlaying(playing);
+        if (!playing)
+            m_previewMarks.clear(); // the marker shown, if any, still times out
         m_playAction->setText(playing ? tr("&Pause") : tr("&Play"));
     });
 
@@ -1049,6 +1061,7 @@ void MainWindow::previewCues()
     }
     const auto last = uint32_t(video->displayOrder.size()) - 1;
     std::vector<PlaybackController::Range> ranges;
+    std::vector<PreviewMark> marks;
     for (const Cue &c : all) {
         const int64_t t = m_index->frameTime(*video, c.frame);
         const uint32_t first = m_index->positionAtTime(*video, t - kPreviewUs);
@@ -1061,9 +1074,10 @@ void MainWindow::previewCues()
         } else {
             ranges.push_back({first, end, c.frame, label});
         }
+        marks.push_back({c.frame, (c.programmeEnds ? tr("▼ Programme ends · %1") : tr("▲ Programme resumes · %1")).arg(c.source),
+                         c.programmeEnds ? kProgrammeEndsColor : kProgrammeResumesColor});
     }
-    m_playback->setAudioStream(playbackAudioStream());
-    m_playback->playRanges(std::move(ranges), m_position);
+    startPreview(std::move(ranges), std::move(marks));
 }
 
 void MainWindow::previewCuts()
@@ -1086,8 +1100,16 @@ void MainWindow::previewCuts()
         return std::max(s.in, m_index->positionAtTime(*video, m_index->frameTime(*video, s.out) - kPreviewUs));
     };
     std::vector<PlaybackController::Range> ranges;
+    std::vector<PreviewMark> marks;
     const auto n = segs.size();
     for (size_t i = 0; i < n; ++i) {
+        // The first and last frame of each part; at a join the end of one
+        // part plays straight into the start of the next.
+        marks.push_back({segs[i].in, i == 0 ? tr("✂ Start of part 1") : tr("✂ Cut %1 · start of part %2").arg(i).arg(i + 1),
+                         kCutColor});
+        marks.push_back({segs[i].out,
+                         i + 1 == n ? tr("✂ End of part %1").arg(n) : tr("✂ Cut %1 · end of part %1").arg(i + 1),
+                         kCutColor});
         ranges.push_back({segs[i].in, startOf(segs[i]), segs[i].in,
                           i == 0 ? tr("start of part 1 of %1").arg(n) : tr("cut %1 of %2: start of part %3").arg(i).arg(n - 1).arg(i + 1)});
         ranges.push_back({endOf(segs[i]), segs[i].out, segs[i].out,
@@ -1103,8 +1125,43 @@ void MainWindow::previewCuts()
             merged.push_back(std::move(r));
         }
     }
+    startPreview(std::move(merged), std::move(marks));
+}
+
+void MainWindow::startPreview(std::vector<PlaybackController::Range> ranges, std::vector<PreviewMark> marks)
+{
+    std::stable_sort(marks.begin(), marks.end(),
+                     [](const PreviewMark &a, const PreviewMark &b) { return a.frame < b.frame; });
     m_playback->setAudioStream(playbackAudioStream());
-    m_playback->playRanges(std::move(merged), m_position);
+    m_playback->playRanges(std::move(ranges), m_position);
+    // playRanges moved to where the preview starts: marks before it are not
+    // shown (the frames arrive later, from the decoder thread).
+    m_previewMarks = std::move(marks);
+    m_marksShownUpTo = int64_t(m_position) - 1;
+    m_lastMark = -1;
+}
+
+void MainWindow::showPreviewMarks(uint32_t shownPos)
+{
+    // Frames still in flight from before the preview, or from a position
+    // the playback has left, are not part of it.
+    if (m_previewMarks.empty() || !m_playback->isPlayingRanges() || shownPos > m_position
+        || int64_t(shownPos) <= m_marksShownUpTo)
+        return;
+    // Every mark passed since the last frame shown, so that one on a frame
+    // skipped (decoding late) still shows; the latest one wins.
+    int hit = -1;
+    for (size_t i = 0; i < m_previewMarks.size(); ++i) {
+        const int64_t f = m_previewMarks[i].frame;
+        if (f > m_marksShownUpTo && f <= int64_t(shownPos))
+            hit = int(i);
+    }
+    m_marksShownUpTo = shownPos;
+    if (hit < 0)
+        return;
+    m_lastMark = hit;
+    m_videoView->setMarker(m_previewMarks[size_t(hit)].text, m_previewMarks[size_t(hit)].color);
+    m_markerTimer->start();
 }
 
 void MainWindow::proposeCutList()
@@ -1176,6 +1233,17 @@ void MainWindow::stopAtPreview()
     if (!m_playback->isPlayingRanges())
         return;
     const PlaybackController::Range range = m_playback->currentRange();
+    // In a stretch shared by several cues or cuts: the one flashed last.
+    if (m_lastMark >= 0) {
+        const PreviewMark mark = m_previewMarks[size_t(m_lastMark)];
+        if (mark.frame >= range.first && mark.frame <= range.last) {
+            goTo(mark.frame); // stops playing
+            m_videoView->setMarker(mark.text, mark.color);
+            m_markerTimer->start();
+            statusBar()->showMessage(tr("Stopped at: %1").arg(mark.text), 6000);
+            return;
+        }
+    }
     goTo(range.anchor); // stops playing
     statusBar()->showMessage(tr("Stopped at: %1").arg(range.label), 6000);
 }
@@ -1199,6 +1267,7 @@ void MainWindow::showFrame(const DisplayFrame &frame)
     if (!video)
         return;
     m_videoView->setFrame(frame.image, frame.displayAspect);
+    showPreviewMarks(frame.pos);
     m_decoderInfo->setText(tr("Video: %1").arg(frame.decoder));
 
     QString kind = QString(QLatin1Char(frame.pictureType));

@@ -35,6 +35,21 @@ void VideoView::setOverlays(const QList<Overlay> &overlays)
     update();
 }
 
+void VideoView::setMarker(const QString &text, const QColor &color)
+{
+    m_markerText = text;
+    m_markerColor = color;
+    update();
+}
+
+void VideoView::clearMarker()
+{
+    if (m_markerText.isEmpty())
+        return;
+    m_markerText.clear();
+    update();
+}
+
 void VideoView::setDrawing(bool drawing)
 {
     m_drawing = drawing;
@@ -106,6 +121,25 @@ void VideoView::paintEvent(QPaintEvent *)
             p.setPen(Qt::black);
             p.drawText(box, Qt::AlignCenter, o.label);
         }
+    }
+
+    // Marker: a thick frame round the picture, the caption centred on top.
+    if (!m_markerText.isEmpty()) {
+        const QRectF t = targetRect();
+        const double w = std::max(4.0, t.height() / 60.0);
+        p.setPen(QPen(m_markerColor, w, Qt::SolidLine, Qt::SquareCap, Qt::MiterJoin));
+        p.setBrush(Qt::NoBrush);
+        p.drawRect(t.adjusted(w / 2, w / 2, -w / 2, -w / 2));
+        QFont big = p.font();
+        big.setPointSizeF(big.pointSizeF() / 0.9 * 1.3);
+        big.setBold(true);
+        p.setFont(big);
+        const QRectF text = p.fontMetrics().boundingRect(m_markerText).adjusted(-10, -4, 10, 4);
+        const QRectF box(t.center().x() - text.width() / 2, t.top() + w, text.width(), text.height());
+        p.fillRect(box, m_markerColor);
+        p.setPen(Qt::black);
+        p.drawText(box, Qt::AlignCenter, m_markerText);
+        p.setFont(font);
     }
 
     // Rectangle being drawn.

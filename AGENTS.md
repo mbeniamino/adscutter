@@ -89,9 +89,8 @@ meson test -C build --list
 
 ## Next goal
 
-The quick previews (Preview Cues `P`, Preview Cuts `Shift+P`, milestone 11) should show
-a visual marker at the moment playback reaches the cue or cut point, so you can see
-exactly where it falls while the 3 s + 3 s stretch plays.
+None set. Milestone 13 (markers on the video during Preview Cues/Cuts) was the last
+one. Ask the user what comes next.
 
 ## Domain knowledge (ad detection)
 

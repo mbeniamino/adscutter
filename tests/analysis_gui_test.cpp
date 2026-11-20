@@ -197,14 +197,24 @@ int main(int argc, char **argv)
     // --- Smart play ---------------------------------------------------------------
     // Records the frames shown (1-based, as the label counts) for `ms`.
     // The label still shows the previous frame for a moment: skipped.
+    // Markers flashed during a preview: the frame shown (1-based) when each
+    // one appeared, and its text.
+    std::vector<std::pair<int, QString>> markers;
     auto watch = [&](int ms) {
         const int before = shownFrame(info);
         std::vector<int> shown;
+        markers.clear();
+        QString lastMarker = view->markerText();
         QElapsedTimer t;
         t.start();
         while (t.elapsed() < ms) {
             QTest::qWait(5);
             const int f = shownFrame(info);
+            if (view->markerText() != lastMarker) {
+                lastMarker = view->markerText();
+                if (!lastMarker.isEmpty())
+                    markers.emplace_back(f, lastMarker);
+            }
             if ((shown.empty() && f == before) || (!shown.empty() && shown.back() == f))
                 continue;
             shown.push_back(f);
@@ -234,9 +244,34 @@ int main(int argc, char **argv)
                 cuesOk ? "only around the cues" : "WRONG");
     if (!cuesOk)
         ++failures;
+    // A marker on each cue frame (or the first frame shown after it, when
+    // decoding is late), saying which way the programme goes.
+    auto expectMarkers = [&](std::vector<std::pair<int, QString>> want, const char *what) {
+        bool ok = markers.size() == want.size();
+        for (size_t i = 0; ok && i < want.size(); ++i)
+            ok = markers[i].first >= want[i].first && markers[i].first <= want[i].first + 3
+                 && markers[i].second.contains(want[i].second);
+        QString got;
+        for (const auto &[f, text] : markers)
+            got += QStringLiteral("%1 \"%2\"  ").arg(f).arg(text);
+        std::printf("%-34s -> %s%s\n", what, qPrintable(got), ok ? "" : " <-- FAIL");
+        if (!ok)
+            ++failures;
+    };
+    // (7.5 s end before the third cue, 1225, is reached.)
+    expectMarkers({{beforeBreak, QStringLiteral("Programme ends")}, {500, QStringLiteral("Programme ends")}},
+                  "P: markers");
     // Enter during the second stretch: stop on its cue.
     QTest::keyClick(&window, Qt::Key_Return);
     expectFrame(info, 1225, "Enter: stopped at the cue");
+    // In a stretch shared by two cues, Enter stops on the one flashed last.
+    QTest::keyClick(&window, Qt::Key_Home);
+    expectFrame(info, 1, "Home (before preview)");
+    QTest::keyClick(&window, Qt::Key_P);
+    if (!QTest::qWaitFor([&] { return view->markerText().contains(QStringLiteral("MEDIASET")); }, 10000))
+        ++failures, std::fprintf(stderr, "FAIL: no marker for the region cue\n");
+    QTest::keyClick(&window, Qt::Key_Return);
+    expectFrame(info, 500, "Enter: stopped at the last marker");
 
     // A cut list made with the keys: I at the start, O at the fade cue, I
     // where the programme resumes, O at the end.
@@ -270,6 +305,10 @@ int main(int argc, char **argv)
                 cutsOk ? "start, end of part 1, start of part 2" : "WRONG");
     if (!cutsOk)
         ++failures;
+    expectMarkers({{1, QStringLiteral("Start of part 1")},
+                   {end1, QStringLiteral("Cut 1 · end of part 1")},
+                   {start2, QStringLiteral("Cut 1 · start of part 2")}},
+                  "Shift+P: markers");
     QTest::keyClick(&window, Qt::Key_Space); // stop
 
     // --- Proposed cut list --------------------------------------------------------

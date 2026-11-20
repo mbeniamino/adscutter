@@ -7,8 +7,10 @@ namespace adscutter {
 
 // Displays a decoded frame, letterboxed and aspect-ratio corrected.
 //
-// It can also show rectangles over the picture (in picture pixels) and,
-// in drawing mode, let the user drag a new one.
+// It can also show rectangles over the picture (in picture pixels), a
+// marker (a coloured frame round the picture with a caption, flashed on
+// the frame a previewed cue or cut is on) and, in drawing mode, let the
+// user drag a new one.
 class VideoView : public QWidget {
     Q_OBJECT
 public:
@@ -23,6 +25,9 @@ public:
     void setFrame(const QImage &image, double displayAspect);
     void clear(const QString &message = {});
     void setOverlays(const QList<Overlay> &overlays);
+    void setMarker(const QString &text, const QColor &color);
+    void clearMarker();
+    const QString &markerText() const { return m_markerText; }
     void setDrawing(bool drawing);
     bool isDrawing() const { return m_drawing; }
 
@@ -48,6 +53,8 @@ private:
     double m_aspect = 16.0 / 9.0;
     QString m_message;
     QList<Overlay> m_overlays;
+    QString m_markerText; // empty: no marker
+    QColor m_markerColor;
     bool m_drawing = false;
     bool m_dragging = false;
     QPointF m_dragStart, m_dragEnd; // widget coordinates
