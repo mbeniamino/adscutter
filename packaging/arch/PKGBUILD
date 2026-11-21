@@ -1,0 +1,55 @@
+# Builds AdsCutter from the git repository this PKGBUILD lives in.
+# Only committed changes are packaged. To build from the server instead, set
+# _repo to the remote URL, e.g. git+ssh://forgejo@git.beniamino.eu:21022/benji/adscutter.git
+#
+#   cd packaging/arch && makepkg -si
+
+pkgname=adscutter
+pkgver=0.1.0
+pkgrel=1
+pkgdesc='Cut ads out of DVB-T/T2 TV recordings without re-encoding'
+arch=('x86_64')
+url='https://git.beniamino.eu/benji/adscutter'
+license=('MIT')
+depends=(
+  'ffmpeg>=2:7'
+  'gcc-libs'
+  'glibc'
+  'hicolor-icon-theme'
+  'qt6-base'
+  'qt6-multimedia'
+)
+optdepends=(
+  'qt6-svg: application icon on X11 and in the About box'
+  'vulkan-driver: Vulkan video decoding'
+  'libva-driver: VAAPI video decoding'
+)
+makedepends=('git' 'meson')
+checkdepends=('desktop-file-utils' 'python')
+
+_repo="git+file://$(realpath "${startdir:-.}/../..")"
+source=("$pkgname::$_repo")
+sha256sums=('SKIP')
+
+pkgver() {
+  cd "$pkgname"
+  local base
+  base=$(sed -n "s/^ *version: '\(.*\)',/\1/p" meson.build | head -n1)
+  printf '%s.r%s.g%s' "$base" "$(git rev-list --count HEAD)" "$(git rev-parse --short=7 HEAD)"
+}
+
+build() {
+  arch-meson "$pkgname" build
+  meson compile -C build
+}
+
+check() {
+  # The hw suite tests the local GPU driver, not the package.
+  meson test -C build --print-errorlogs --no-suite hw
+}
+
+package() {
+  meson install -C build --destdir "$pkgdir"
+  # MIT is not in Arch's common licenses, so the text must ship with the package.
+  install -Dm644 "$pkgname/LICENSE" -t "$pkgdir/usr/share/licenses/$pkgname"
+}

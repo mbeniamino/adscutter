@@ -2,6 +2,7 @@
 
 #include <QApplication>
 #include <QCommandLineParser>
+#include <QIcon>
 
 extern "C" {
 #include <libavutil/log.h>
@@ -11,10 +12,13 @@ int main(int argc, char *argv[])
 {
     QApplication app(argc, argv);
     QApplication::setApplicationName(QStringLiteral("AdsCutter"));
-    QApplication::setApplicationVersion(QStringLiteral("0.1.0"));
+    QApplication::setApplicationVersion(QStringLiteral(ADSCUTTER_VERSION));
     QApplication::setOrganizationName(QStringLiteral("adscutter"));
     // Used as the Wayland app_id; must match the .desktop file name.
     QGuiApplication::setDesktopFileName(QStringLiteral("adscutter"));
+    // Wayland compositors take the icon from the .desktop file; X11 and
+    // the About box need it set on the application.
+    QApplication::setWindowIcon(QIcon::fromTheme(QStringLiteral("adscutter")));
 
     QCommandLineParser parser;
     parser.setApplicationDescription(QStringLiteral("Cut ads out of TV recordings without re-encoding."));

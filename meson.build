@@ -1,5 +1,7 @@
 project('adscutter', 'cpp',
   version: '0.1.0',
+  license: 'MIT',
+  license_files: 'LICENSE',
   meson_version: '>= 1.3.0',
   default_options: [
     'cpp_std=c++20',
@@ -102,6 +104,8 @@ ui_dep = declare_dependency(
 
 executable('adscutter',
   files('src/main.cpp'),
+  # Single source of truth for the version shown in --version and About.
+  cpp_args: '-DADSCUTTER_VERSION="@0@"'.format(meson.project_version()),
   dependencies: ui_dep,
   install: true,
 )
@@ -110,3 +114,15 @@ subdir('tests')
 
 install_data('data/adscutter.desktop',
   install_dir: get_option('datadir') / 'applications')
+install_man(configure_file(
+  input: 'data/adscutter.1.in',
+  output: 'adscutter.1',
+  configuration: {'VERSION': meson.project_version()},
+))
+install_data('data/icons/adscutter.svg',
+  install_dir: get_option('datadir') / 'icons' / 'hicolor' / 'scalable' / 'apps')
+
+desktop_file_validate = find_program('desktop-file-validate', required: false)
+if desktop_file_validate.found()
+  test('desktop file', desktop_file_validate, args: files('data/adscutter.desktop'))
+endif

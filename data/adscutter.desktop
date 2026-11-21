@@ -1,9 +1,15 @@
 [Desktop Entry]
 Type=Application
 Name=AdsCutter
+GenericName=TV Recording Cutter
+GenericName[it]=Taglio registrazioni TV
 Comment=Cut ads out of TV recordings without re-encoding
+Comment[it]=Taglia la pubblicità dalle registrazioni TV senza ricodificare
 Exec=adscutter %f
-Icon=video-x-generic
+TryExec=adscutter
+Icon=adscutter
 Terminal=false
 Categories=AudioVideo;Video;AudioVideoEditing;Qt;
-MimeType=video/mp2t;video/x-matroska;
+MimeType=video/mp2t;video/vnd.dlna.mpeg-tts;video/x-matroska;
+Keywords=DVB;MPEG-TS;Matroska;MKV;commercials;advertising;cut;edit;
+Keywords[it]=DVB;MPEG-TS;Matroska;MKV;pubblicità;spot;taglio;

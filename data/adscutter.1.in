@@ -1,0 +1,85 @@
+.TH ADSCUTTER 1 "" "AdsCutter @VERSION@" "User Commands"
+.SH NAME
+adscutter \- cut ads out of TV recordings without re\-encoding
+.SH SYNOPSIS
+.B adscutter
+.RB [ \-v ]
+.RI [ file ]
+.SH DESCRIPTION
+.B AdsCutter
+is a desktop application that removes advertising breaks from DVB\-T/T2
+television recordings.
+It reads MPEG transport streams and Matroska files and writes Matroska,
+copying the streams without re\-encoding.
+.PP
+Every kept segment starts on a frame where decoding can begin and may end on
+any frame.
+H.264 and HEVC cut points are rewritten so that each segment starts cleanly.
+.PP
+Ad detection (fades to black, separators, and regions of the picture drawn by
+the user, such as the text under a channel logo) is built in and only runs
+when asked for from the
+.B Analysis
+which is then disabled.
+It proposes a cut list that can be reviewed and edited before export.
+.SH OPTIONS
+.TP
+.BR \-v ", " \-\-verbose
+Print FFmpeg diagnostics.
+Broadcast recordings start mid\-stream, so expect warnings about missing
+references.
+.TP
+.BR \-h ", " \-\-help
+Show a summary of the options.
+.TP
+.B \-\-version
+Show the version.
+.TP
+.I file
+Recording to open.
+A file can also be dropped on the window; a cut list dropped on an open
+recording is loaded.
+.PP
+Qt options such as
+.B \-platform
+are accepted as well.
+.SH ENVIRONMENT
+.TP
+.B ADSCUTTER_HWDEC
+Hardware decoding:
+.BR auto " (Vulkan, then VAAPI, then software),"
+.BR vulkan ,
+.BR vaapi ,
+or
+.BR none .
+Overrides
+.BR View " > " "Hardware Decoding" ,
+which is then disabled.
+.SH FILES
+.TP
+.IB name .adscutter.json
+The cut list, saved next to the recording
+.IR name .ts
+or
+.IR name .mkv .
+.TP
+.IB name .cut.mkv
+Default name of the exported recording.
+.TP
+.I ~/.cache/adscutter/
+Packet indexes and analysis results, keyed by the recording's path, size and
+modification time.
+Safe to delete; they are rebuilt when needed.
+Honours
+.BR XDG_CACHE_HOME .
+.TP
+.I ~/.config/adscutter/AdsCutter.conf
+Preferences, recent files and region presets.
+Honours
+.BR XDG_CONFIG_HOME .
+.SH NOTES
+The keyboard shortcuts are listed under
+.BR Help " > " "Keyboard Shortcuts" .
+.SH SEE ALSO
+.BR ffmpeg (1),
+.BR mkvmerge (1)

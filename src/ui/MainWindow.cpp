@@ -1953,7 +1953,8 @@ void MainWindow::showAbout()
 {
     QMessageBox::about(this, tr("About AdsCutter"),
                        tr("<b>AdsCutter %1</b><p>Cut ads out of TV recordings without "
-                          "re-encoding.</p><p>Uses FFmpeg %2 and Qt %3.</p>")
+                          "re-encoding.</p><p>Released under the MIT license.</p>"
+                          "<p>Uses FFmpeg %2 and Qt %3.</p>")
                            .arg(QApplication::applicationVersion(), QString::fromUtf8(av_version_info()),
                                 QString::fromUtf8(qVersion())));
 }

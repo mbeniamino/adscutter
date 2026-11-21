@@ -283,6 +283,7 @@ foreach backend : ['vulkan', 'vaapi']
       depends: fixture_targets[f],
       timeout: 180,
       is_parallel: false, # one GPU, shared
+      suite: 'hw', # depends on the local GPU driver; packaging skips it
     )
   endforeach
 endforeach

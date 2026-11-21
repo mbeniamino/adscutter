@@ -1,3 +1,5 @@
 build/
 /subprojects/packagecache/
 *.user
+/packaging/arch/*
+!/packaging/arch/PKGBUILD

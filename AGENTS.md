@@ -20,6 +20,7 @@ meson test -C build        # whole suite (~59 tests)
 meson test -C build 'export h264_hd.ts 30-70,100-149'   # one test, by name
 meson test -C build --list
 ./build/adscutter [file]
+cd packaging/arch && makepkg -si   # Arch package from the last commit
 ```
 
 - Dependencies: Qt 6 (Core, Gui, Widgets, Multimedia, and Test for the GUI tests),
@@ -30,7 +31,8 @@ meson test -C build --list
   Media files are never committed.
 - GUI tests run with `QT_QPA_PLATFORM=offscreen` and their own `XDG_CACHE_HOME`.
 - `hw_test` covers Vulkan and VAAPI. It exits with 77 (skipped) when a backend is missing and
-  runs serially because the GPU is shared.
+  runs serially because the GPU is shared. Its tests are in the `hw` suite, which the
+  PKGBUILD skips (`--no-suite hw`) because they test the local driver, not the package.
 - Tests are plain executables with a `CHECK` macro and a failure count (see
   `tests/cutlist_test.cpp`). Shared helpers are in `tests/TestUtil.h`. There is no test
   framework, except QtTest in the GUI tests.
@@ -56,6 +58,13 @@ meson test -C build --list
   into a cut list.
 - `src/ui/`: `MainWindow` with menus, actions and settings, plus `Timeline`, `VideoView`,
   `NavigationBar`, `Playback`, and the panels for segments, streams and regions.
+- `data/`: the `.desktop` file (its name is the Wayland app_id set in `main.cpp`), the
+  SVG icon and the man page `adscutter.1.in` (meson fills in the version), all installed
+  by meson. Keep the man page in step with options, environment variables and file locations. `desktop-file-validate` runs as a test when available.
+- `packaging/arch/PKGBUILD`: clones this repository (committed state only), versions the
+  package from the meson version plus the git revision, builds with `arch-meson`.
+- The version lives only in `meson.build` (`project(version:)`); it reaches the code as
+  `ADSCUTTER_VERSION`.
 - Build: `meson.build` lists every source by hand, so add new `.cpp` files there.
   Headers that declare `Q_OBJECT` classes must also be added to the matching
   `qt6.compile_moc(headers: ...)` list.
