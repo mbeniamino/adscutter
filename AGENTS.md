@@ -20,7 +20,7 @@ meson test -C build        # whole suite (~59 tests)
 meson test -C build 'export h264_hd.ts 30-70,100-149'   # one test, by name
 meson test -C build --list
 ./build/adscutter [file]
-cd packaging/arch && makepkg -si   # Arch package from the last commit
+cd packaging/arch && makepkg -si   # Arch package of the release tag
 ```
 
 - Dependencies: Qt 6 (Core, Gui, Widgets, Multimedia, and Test for the GUI tests),
@@ -61,8 +61,10 @@ cd packaging/arch && makepkg -si   # Arch package from the last commit
 - `data/`: the `.desktop` file (its name is the Wayland app_id set in `main.cpp`), the
   SVG icon and the man page `adscutter.1.in` (meson fills in the version), all installed
   by meson. Keep the man page in step with options, environment variables and file locations. `desktop-file-validate` runs as a test when available.
-- `packaging/arch/PKGBUILD`: clones this repository (committed state only), versions the
-  package from the meson version plus the git revision, builds with `arch-meson`.
+- `packaging/arch/PKGBUILD`: builds the release tag `v$pkgver` of this repository with
+  `arch-meson`. A release: set the version in `meson.build`, commit, tag `vX.Y.Z`
+  (annotated), then set `pkgver` in the PKGBUILD (and `pkgrel=1`) and refresh
+  `sha256sums` with `makepkg -g`.
 - The version lives only in `meson.build` (`project(version:)`); it reaches the code as
   `ADSCUTTER_VERSION`.
 - Build: `meson.build` lists every source by hand, so add new `.cpp` files there.

@@ -1,8 +1,12 @@
-# Builds AdsCutter from the git repository this PKGBUILD lives in.
-# Only committed changes are packaged. To build from the server instead, set
-# _repo to the remote URL, e.g. git+ssh://forgejo@git.beniamino.eu:21022/benji/adscutter.git
+# Builds the AdsCutter release tagged v$pkgver in the git repository this
+# PKGBUILD lives in. To build from the server instead, set _repo to the
+# remote URL, e.g. git+ssh://forgejo@git.beniamino.eu:21022/benji/adscutter.git
 #
 #   cd packaging/arch && makepkg -si
+#
+# For a new release: set the version in meson.build, commit, tag it
+# vX.Y.Z, then set pkgver here (pkgrel back to 1) and refresh
+# sha256sums with makepkg -g.
 
 pkgname=adscutter
 pkgver=0.1.0
@@ -28,15 +32,8 @@ makedepends=('git' 'meson')
 checkdepends=('desktop-file-utils' 'python')
 
 _repo="git+file://$(realpath "${startdir:-.}/../..")"
-source=("$pkgname::$_repo")
-sha256sums=('SKIP')
-
-pkgver() {
-  cd "$pkgname"
-  local base
-  base=$(sed -n "s/^ *version: '\(.*\)',/\1/p" meson.build | head -n1)
-  printf '%s.r%s.g%s' "$base" "$(git rev-list --count HEAD)" "$(git rev-parse --short=7 HEAD)"
-}
+source=("$pkgname::$_repo#tag=v$pkgver")
+sha256sums=('a6ed8349f44222b48211d5c64aa356bed644987bdcfa75eeab572aa4d83388ee')
 
 build() {
   arch-meson "$pkgname" build
