@@ -145,9 +145,12 @@ bool RandomAccessDecoder::startRun(uint32_t keyPos, QString *error)
     const uint32_t keyPacket = m_stream->displayOrder[keyPos];
     const PacketIndex::Packet &key = m_stream->packets[keyPacket];
 
-    // Hardware decoders (seen with HEVC on Vulkan and VAAPI) do not always
-    // restart after the end-of-stream drain: reopen them instead.
-    if (m_inputDone && m_hw.active) {
+    // Flushing does not fully reset hardware decoders: after the
+    // end-of-stream drain they may not restart (HEVC on Vulkan and VAAPI),
+    // and Vulkan H.264 seeking back to an open GOP decoded wrong interlaced
+    // pictures from stale references. Reopen them instead; the device is
+    // shared, so this is cheap.
+    if (m_hw.active) {
         if (!openCodec(m_hwPreference, error))
             return false;
     } else {

@@ -4,7 +4,7 @@
 //
 // Random access with the given backend must return the same pictures as a
 // sequential software decode: stepping backwards through every GOP and 60
-// random jumps. Frames are compared after converting both to planar YUV;
+// random jumps, and back into each GOP after the next. Frames are compared after converting both to planar YUV;
 // H.264 and HEVC decoding is bit exact by specification, so they must be
 // identical (MPEG-2 allows IDCT differences: it must then be clearly the
 // right frame, much closer to it than to its neighbours). Interlaced frames are also deinterlaced in the hardware format
@@ -168,6 +168,13 @@ int main(int argc, char **argv)
             check(pos, "backward");
     }
     decoder.setCacheBudget(0);
+    // Back into each GOP after decoding the next one: the seek must not reuse
+    // the decoder's state (Vulkan H.264 interlaced once decoded wrong pictures
+    // from stale references there). The last frame needs the whole GOP.
+    for (size_t k = 0; k + 1 < video.keyframes.size(); ++k) {
+        check(video.keyframes[k + 1], "back");
+        check(video.keyframes[k + 1] - 1, "back");
+    }
     uint32_t state = 4242;
     for (int i = 0; i < 60; ++i) { // each jump decodes up to a whole GOP
         state = state * 1103515245u + 12345u;
