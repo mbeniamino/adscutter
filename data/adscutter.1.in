@@ -20,7 +20,7 @@ Ad detection (fades to black, separators, and regions of the picture drawn by
 the user, such as the text under a channel logo) is built in and only runs
 when asked for from the
 .B Analysis
-which is then disabled.
+menu.
 It proposes a cut list that can be reviewed and edited before export.
 .SH OPTIONS
 .TP

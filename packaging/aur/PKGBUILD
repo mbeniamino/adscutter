@@ -1,0 +1,48 @@
+# AUR package: builds the AdsCutter release tagged v$pkgver from GitHub.
+# packaging/arch/PKGBUILD builds the same tag from a local checkout.
+#
+# For a new release, after pushing the tag: set pkgver (pkgrel back to 1),
+# refresh sha256sums with makepkg -g, regenerate .SRCINFO with
+# makepkg --printsrcinfo > .SRCINFO, and push both files to the AUR.
+
+pkgname=adscutter
+pkgver=0.1.0
+pkgrel=1
+pkgdesc='Cut ads out of DVB-T/T2 TV recordings without re-encoding'
+arch=('x86_64')
+url='https://github.com/mbeniamino/adscutter'
+license=('MIT')
+depends=(
+  'ffmpeg>=2:7'
+  'gcc-libs'
+  'glibc'
+  'hicolor-icon-theme'
+  'qt6-base'
+  'qt6-multimedia'
+)
+optdepends=(
+  'qt6-svg: application icon on X11 and in the About box'
+  'vulkan-driver: Vulkan video decoding'
+  'libva-driver: VAAPI video decoding'
+)
+makedepends=('git' 'meson')
+checkdepends=('desktop-file-utils' 'python')
+
+source=("$pkgname::git+https://github.com/mbeniamino/adscutter.git#tag=v$pkgver")
+sha256sums=('a6ed8349f44222b48211d5c64aa356bed644987bdcfa75eeab572aa4d83388ee')
+
+build() {
+  arch-meson "$pkgname" build
+  meson compile -C build
+}
+
+check() {
+  # The hw suite tests the local GPU driver, not the package.
+  meson test -C build --print-errorlogs --no-suite hw
+}
+
+package() {
+  meson install -C build --destdir "$pkgdir"
+  # MIT is not in Arch's common licenses, so the text must ship with the package.
+  install -Dm644 "$pkgname/LICENSE" -t "$pkgdir/usr/share/licenses/$pkgname"
+}

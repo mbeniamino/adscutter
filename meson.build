@@ -1,5 +1,5 @@
 project('adscutter', 'cpp',
-  version: '0.1.0',
+  version: '0.1.1',
   license: 'MIT',
   license_files: 'LICENSE',
   meson_version: '>= 1.3.0',
@@ -122,7 +122,20 @@ install_man(configure_file(
 install_data('data/icons/adscutter.svg',
   install_dir: get_option('datadir') / 'icons' / 'hicolor' / 'scalable' / 'apps')
 
+metainfo = files('data/io.github.mbeniamino.adscutter.metainfo.xml')
+install_data(metainfo, install_dir: get_option('datadir') / 'metainfo')
+
 desktop_file_validate = find_program('desktop-file-validate', required: false)
 if desktop_file_validate.found()
   test('desktop file', desktop_file_validate, args: files('data/adscutter.desktop'))
 endif
+appstreamcli = find_program('appstreamcli', required: false)
+if appstreamcli.found()
+  test('metainfo', appstreamcli, args: ['validate', '--no-net', metainfo])
+endif
+# Catches a release whose version was bumped without a metainfo entry.
+test('metainfo version', find_program('python3'),
+  args: ['-c', '''import sys, xml.etree.ElementTree as ET
+r = ET.parse(sys.argv[1]).find('releases/release')
+sys.exit(0 if r is not None and r.get('version') == sys.argv[2] else 'newest metainfo release is not ' + sys.argv[2])''',
+    metainfo, meson.project_version()])

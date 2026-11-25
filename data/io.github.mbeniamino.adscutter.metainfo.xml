@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- The ID is reverse-DNS as AppStream wants, while the desktop file keeps its
+     short name because that name is also the Wayland app_id. -->
+<component type="desktop-application">
+  <id>io.github.mbeniamino.adscutter</id>
+  <metadata_license>MIT</metadata_license>
+  <project_license>MIT</project_license>
+  <name>AdsCutter</name>
+  <summary>Cut ads out of TV recordings without re-encoding</summary>
+  <summary xml:lang="it">Taglia la pubblicità dalle registrazioni TV senza ricodificare</summary>
+  <developer id="io.github.mbeniamino">
+    <name>Matteo Beniamino</name>
+  </developer>
+  <description>
+    <p>
+      AdsCutter removes advertising breaks from DVB-T/T2 television recordings.
+      It reads MPEG transport streams and Matroska files and writes Matroska,
+      copying the streams, so exporting is fast and the picture and sound are
+      not degraded.
+    </p>
+    <ul>
+      <li>Frame-accurate navigation, with every kept part starting on a frame where decoding can begin</li>
+      <li>MPEG-2, H.264 and HEVC video, with clean joins for H.264 and HEVC</li>
+      <li>Choice of the video, audio and subtitle streams to export</li>
+      <li>Vulkan and VAAPI hardware decoding, and deinterlacing</li>
+      <li>Optional ad detection from fades, separators and user-drawn regions, which proposes a cut list to review</li>
+    </ul>
+  </description>
+  <launchable type="desktop-id">adscutter.desktop</launchable>
+  <provides>
+    <binary>adscutter</binary>
+  </provides>
+  <categories>
+    <category>AudioVideo</category>
+    <category>Video</category>
+    <category>AudioVideoEditing</category>
+  </categories>
+  <keywords>
+    <keyword>DVB</keyword>
+    <keyword>MPEG-TS</keyword>
+    <keyword>Matroska</keyword>
+    <keyword>commercials</keyword>
+    <keyword>advertising</keyword>
+  </keywords>
+  <url type="homepage">https://github.com/mbeniamino/adscutter</url>
+  <url type="bugtracker">https://github.com/mbeniamino/adscutter/issues</url>
+  <url type="vcs-browser">https://github.com/mbeniamino/adscutter</url>
+  <content_rating type="oars-1.1"/>
+  <supports>
+    <control>keyboard</control>
+    <control>pointing</control>
+  </supports>
+  <!-- Newest first. Add an entry for every release, matching NEWS.md. -->
+  <releases>
+    <release version="0.1.1" date="2026-11-25">
+      <description>
+        <p>Packaging and documentation: README, AppStream metadata, an AUR package and a man page fix.</p>
+      </description>
+    </release>
+    <release version="0.1.0" date="2026-11-21">
+      <description>
+        <p>First release.</p>
+      </description>
+    </release>
+  </releases>
+</component>

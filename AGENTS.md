@@ -16,7 +16,7 @@ end on any frame. The original requirements are in `specs`. Ad detection
 ```sh
 meson setup build          # once; defaults: C++20, warning_level=3, debugoptimized
 meson compile -C build
-meson test -C build        # whole suite (~59 tests)
+meson test -C build        # whole suite (~62 tests)
 meson test -C build 'export h264_hd.ts 30-70,100-149'   # one test, by name
 meson test -C build --list
 ./build/adscutter [file]
@@ -59,12 +59,24 @@ cd packaging/arch && makepkg -si   # Arch package of the release tag
 - `src/ui/`: `MainWindow` with menus, actions and settings, plus `Timeline`, `VideoView`,
   `NavigationBar`, `Playback`, and the panels for segments, streams and regions.
 - `data/`: the `.desktop` file (its name is the Wayland app_id set in `main.cpp`), the
-  SVG icon and the man page `adscutter.1.in` (meson fills in the version), all installed
-  by meson. Keep the man page in step with options, environment variables and file locations. `desktop-file-validate` runs as a test when available.
-- `packaging/arch/PKGBUILD`: builds the release tag `v$pkgver` of this repository with
-  `arch-meson`. A release: set the version in `meson.build`, commit, tag `vX.Y.Z`
-  (annotated), then set `pkgver` in the PKGBUILD (and `pkgrel=1`) and refresh
-  `sha256sums` with `makepkg -g`.
+  SVG icon, the AppStream file `io.github.mbeniamino.adscutter.metainfo.xml` (reverse-DNS
+  ID; its `launchable` points at the desktop file) and the man page `adscutter.1.in`
+  (meson fills in the version), all installed by meson. Keep the man page in step with options, environment variables and file locations. `desktop-file-validate` and
+  `appstreamcli validate` run as tests when available, and a test checks that the newest
+  metainfo release matches the project version.
+- `README.md`: the user-facing overview (features, build, usage, files). Keep it in step
+  with the man page when features, options or file locations change. `NEWS.md` lists the
+  changes in each release.
+- `packaging/arch/PKGBUILD`: builds the release tag `v$pkgver` of this local repository
+  with `arch-meson`. `packaging/aur/PKGBUILD` is the same package built from GitHub, for
+  the AUR (with its `.SRCINFO`).
+- A release: set the version in `meson.build`, add the release to `NEWS.md` and at the top
+  of the metainfo `<releases>`, commit, tag `vX.Y.Z` (annotated). Then set `pkgver` in both
+  PKGBUILDs (and `pkgrel=1`), refresh `sha256sums` with `makepkg -g` (git sources hash the
+  tagged tree, so both get the same sum), regenerate `packaging/aur/.SRCINFO` with
+  `makepkg --printsrcinfo`, and commit. Push the tag to GitHub before publishing on the AUR.
+- Remotes: `origin` is the private Forgejo repository. The public repository is
+  https://github.com/mbeniamino/adscutter.git (the README's clone URL).
 - The version lives only in `meson.build` (`project(version:)`); it reaches the code as
   `ADSCUTTER_VERSION`.
 - Build: `meson.build` lists every source by hand, so add new `.cpp` files there.

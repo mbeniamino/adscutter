@@ -3,3 +3,6 @@ build/
 *.user
 /packaging/arch/*
 !/packaging/arch/PKGBUILD
+/packaging/aur/*
+!/packaging/aur/PKGBUILD
+!/packaging/aur/.SRCINFO
