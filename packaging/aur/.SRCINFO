@@ -1,0 +1,24 @@
+pkgbase = adscutter
+	pkgdesc = Cut ads out of DVB-T/T2 TV recordings without re-encoding
+	pkgver = 0.1.1
+	pkgrel = 1
+	url = https://github.com/mbeniamino/adscutter
+	arch = x86_64
+	license = MIT
+	checkdepends = desktop-file-utils
+	checkdepends = python
+	makedepends = git
+	makedepends = meson
+	depends = ffmpeg>=2:7
+	depends = gcc-libs
+	depends = glibc
+	depends = hicolor-icon-theme
+	depends = qt6-base
+	depends = qt6-multimedia
+	optdepends = qt6-svg: application icon on X11 and in the About box
+	optdepends = vulkan-driver: Vulkan video decoding
+	optdepends = libva-driver: VAAPI video decoding
+	source = adscutter::git+https://github.com/mbeniamino/adscutter.git#tag=v0.1.1
+	sha256sums = f4e5a380bd1a2489188f761e72c3e472754667a8a851387fd5b75c519131fd47
+
+pkgname = adscutter

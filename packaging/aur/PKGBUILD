@@ -6,7 +6,7 @@
 # makepkg --printsrcinfo > .SRCINFO, and push both files to the AUR.
 
 pkgname=adscutter
-pkgver=0.1.0
+pkgver=0.1.1
 pkgrel=1
 pkgdesc='Cut ads out of DVB-T/T2 TV recordings without re-encoding'
 arch=('x86_64')
@@ -29,7 +29,7 @@ makedepends=('git' 'meson')
 checkdepends=('desktop-file-utils' 'python')
 
 source=("$pkgname::git+https://github.com/mbeniamino/adscutter.git#tag=v$pkgver")
-sha256sums=('a6ed8349f44222b48211d5c64aa356bed644987bdcfa75eeab572aa4d83388ee')
+sha256sums=('f4e5a380bd1a2489188f761e72c3e472754667a8a851387fd5b75c519131fd47')
 
 build() {
   arch-meson "$pkgname" build
